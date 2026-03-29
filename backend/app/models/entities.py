@@ -9,6 +9,7 @@ from app.models.enums import (
     AssignmentStatus,
     LessonType,
     NotificationChannel,
+    PaymentStatus,
     ProgramProgressStatus,
     ProgressStatus,
     UserRole,
@@ -33,6 +34,8 @@ class Program(Base):
     strict_order: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     certification_progress_threshold: Mapped[float] = mapped_column(Float, default=100.0, nullable=False)
     certification_min_avg_score: Mapped[float] = mapped_column(Float, default=60.0, nullable=False)
+    is_paid: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    price_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     modules: Mapped[list['Module']] = relationship(back_populates='program', cascade='all, delete-orphan')
     groups: Mapped[list['Group']] = relationship(back_populates='program', cascade='all, delete-orphan')
@@ -65,6 +68,7 @@ class Lesson(Base):
         back_populates='lesson',
         cascade='all, delete-orphan',
     )
+    materials: Mapped[list['LessonMaterial']] = relationship(back_populates='lesson', cascade='all, delete-orphan')
 
 
 class Group(Base):
@@ -89,6 +93,7 @@ class Student(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    organization: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     enrollments: Mapped[list['Enrollment']] = relationship(back_populates='student', cascade='all, delete-orphan')
     user_links: Mapped[list['UserStudentLink']] = relationship(back_populates='student', cascade='all, delete-orphan')
@@ -112,6 +117,17 @@ class Enrollment(Base):
     )
     certification_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     certificate_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    certificate_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    payment_status: Mapped[PaymentStatus] = mapped_column(
+        Enum(PaymentStatus),
+        nullable=False,
+        default=PaymentStatus.not_required,
+    )
+    payment_link: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    payment_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payment_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payment_provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    payment_external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     group: Mapped[Group] = relationship(back_populates='enrollments')
     student: Mapped[Student] = relationship(back_populates='enrollments')
@@ -151,6 +167,10 @@ class User(Base):
     temp_password_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    telegram_chat_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    telegram_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    telegram_link_token: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    telegram_linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     roles: Mapped[list['UserRoleLink']] = relationship(back_populates='user', cascade='all, delete-orphan')
     student_link: Mapped['UserStudentLink | None'] = relationship(back_populates='user', uselist=False, cascade='all, delete-orphan')
@@ -162,6 +182,7 @@ class User(Base):
     sent_reminders: Mapped[list['ReminderLog']] = relationship(back_populates='curator')
     notifications: Mapped[list['Notification']] = relationship(back_populates='recipient', cascade='all, delete-orphan')
     audit_events: Mapped[list['AuditEvent']] = relationship(back_populates='actor')
+    integration_errors: Mapped[list['IntegrationErrorLog']] = relationship(back_populates='user')
 
 
 class UserRoleLink(Base):
@@ -241,6 +262,10 @@ class AssignmentSubmission(Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     student_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     override_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    file_mime: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     enrollment: Mapped[Enrollment] = relationship(back_populates='assignment_submissions')
     lesson: Mapped[Lesson] = relationship(back_populates='assignment_submissions')
@@ -260,6 +285,21 @@ class TestAttempt(Base):
     actor_user_id: Mapped[str | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
 
     enrollment: Mapped[Enrollment] = relationship(back_populates='test_attempts')
+
+
+class LessonMaterial(Base):
+    __tablename__ = 'lesson_materials'
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    lesson_id: Mapped[str] = mapped_column(ForeignKey('lessons.id', ondelete='CASCADE'), nullable=False)
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_key: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    file_mime: Mapped[str] = mapped_column(String(100), nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    uploaded_by_user_id: Mapped[str | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    lesson: Mapped[Lesson] = relationship(back_populates='materials')
 
 
 class Notification(Base):
@@ -292,6 +332,20 @@ class AuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     actor: Mapped[User | None] = relationship(back_populates='audit_events')
+
+
+class IntegrationErrorLog(Base):
+    __tablename__ = 'integration_error_logs'
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    service: Mapped[str] = mapped_column(String(100), nullable=False)
+    operation: Mapped[str] = mapped_column(String(100), nullable=False)
+    error_text: Mapped[str] = mapped_column(Text, nullable=False)
+    context_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    user: Mapped[User | None] = relationship(back_populates='integration_errors')
 
 
 class StudentQuestion(Base):

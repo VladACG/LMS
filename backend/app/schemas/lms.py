@@ -1,9 +1,16 @@
-﻿from datetime import datetime
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
-from app.models.enums import AssignmentStatus, LessonType, NotificationChannel, ProgressStatus, UserRole
+from app.models.enums import (
+    AssignmentStatus,
+    LessonType,
+    NotificationChannel,
+    PaymentStatus,
+    ProgressStatus,
+    UserRole,
+)
 
 
 class ProgramCreate(BaseModel):
@@ -12,6 +19,8 @@ class ProgramCreate(BaseModel):
     strict_order: bool = True
     certification_progress_threshold: float = Field(default=100.0, ge=0, le=100)
     certification_min_avg_score: float = Field(default=60.0, ge=0, le=100)
+    is_paid: bool = False
+    price_amount: float | None = Field(default=None, ge=0)
 
 
 class ProgramOut(BaseModel):
@@ -25,6 +34,8 @@ class ProgramOut(BaseModel):
     strict_order: bool = True
     certification_progress_threshold: float = 100.0
     certification_min_avg_score: float = 60.0
+    is_paid: bool = False
+    price_amount: float | None = None
 
 
 class ModuleCreate(BaseModel):
@@ -51,6 +62,8 @@ class LessonCreate(BaseModel):
     test_pass_score: float = Field(default=60.0, ge=0, le=100)
     test_max_attempts: int = Field(default=3, ge=1, le=50)
     assignment_pass_score: float = Field(default=60.0, ge=0, le=100)
+    webinar_start_at: datetime | None = None
+    webinar_join_url: HttpUrl | None = None
 
 
 class LessonOut(BaseModel):
@@ -85,6 +98,8 @@ class ProgramDetailOut(BaseModel):
     strict_order: bool = True
     certification_progress_threshold: float = 100.0
     certification_min_avg_score: float = 60.0
+    is_paid: bool = False
+    price_amount: float | None = None
     modules: list[ModuleTreeOut]
 
 
@@ -108,6 +123,7 @@ class GroupOut(BaseModel):
 class StudentIn(BaseModel):
     full_name: str = Field(min_length=2, max_length=255)
     email: str | None = None
+    organization: str | None = None
 
 
 class EnrollmentCreate(BaseModel):
@@ -119,6 +135,9 @@ class EnrollmentOut(BaseModel):
     student_id: str
     full_name: str
     email: str | None
+    organization: str | None = None
+    payment_status: PaymentStatus = PaymentStatus.not_required
+    payment_link: str | None = None
 
 
 class StudentLessonOut(BaseModel):
@@ -138,6 +157,9 @@ class StudentLessonsResponse(BaseModel):
     total: int
     completed: int
     program_status: Literal['not_started', 'in_progress', 'completed']
+    payment_status: PaymentStatus = PaymentStatus.not_required
+    payment_required: bool = False
+    payment_link: str | None = None
     lessons: list[StudentLessonOut]
 
 
@@ -172,6 +194,7 @@ class CertificateOut(BaseModel):
     enrollment_id: str
     certificate_url: str
     issued_at: datetime
+    certificate_number: str | None = None
 
 
 class GroupProgressRow(BaseModel):
@@ -190,6 +213,11 @@ class GroupProgressRow(BaseModel):
     last_login_at: datetime | None = None
     program_status: Literal['not_started', 'in_progress', 'completed'] = 'not_started'
     certificate_available: bool = False
+    organization: str | None = None
+    average_score: float = 0.0
+    completion_date: datetime | None = None
+    certificate_number: str | None = None
+    payment_status: PaymentStatus = PaymentStatus.not_required
 
 
 class GroupProgressResponse(BaseModel):
@@ -213,6 +241,8 @@ class UserProfileOut(BaseModel):
     blocked: bool
     temp_password_required: bool
     student_id: str | None = None
+    telegram_linked: bool = False
+    telegram_username: str | None = None
 
 
 class LoginResponse(BaseModel):
@@ -244,6 +274,7 @@ class UserCreate(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     roles: list[UserRole] = Field(min_length=1)
     temp_password_required: bool = False
+    organization: str | None = None
 
 
 class UserRoleUpdate(BaseModel):
@@ -257,6 +288,7 @@ class UserOut(BaseModel):
     blocked: bool
     temp_password_required: bool
     roles: list[UserRole]
+    telegram_linked: bool = False
 
 
 class GroupUserAssignRequest(BaseModel):
@@ -301,6 +333,10 @@ class AssignmentOut(BaseModel):
     reviewed_by_user_id: str | None
     reviewed_at: datetime | None
     student_viewed_at: datetime | None
+    file_name: str | None = None
+    file_mime: str | None = None
+    file_size_bytes: int | None = None
+    file_download_url: str | None = None
 
 
 class QuestionCreateRequest(BaseModel):
@@ -374,3 +410,77 @@ class TestAttemptsOverrideRequest(BaseModel):
 class AutomationRunResult(BaseModel):
     generated_notifications: int
     generated_events: int
+
+
+class TelegramLinkOut(BaseModel):
+    invite_url: str
+    linked: bool
+    telegram_username: str | None = None
+
+
+class TelegramConfirmRequest(BaseModel):
+    token: str
+    chat_id: str
+    username: str | None = None
+
+
+class CalendarLinksOut(BaseModel):
+    google_url: str
+    yandex_url: str
+    ics_url: str
+
+
+class LessonMaterialOut(BaseModel):
+    id: str
+    lesson_id: str
+    file_name: str
+    file_mime: str
+    file_size_bytes: int
+    uploaded_at: datetime
+    download_url: str
+
+
+class PaymentOut(BaseModel):
+    enrollment_id: str
+    payment_status: PaymentStatus
+    payment_link: str | None
+    payment_due_at: datetime | None
+    payment_confirmed_at: datetime | None
+
+
+class PaymentWebhookRequest(BaseModel):
+    enrollment_id: str
+    status: Literal['paid', 'pending', 'canceled']
+    external_id: str | None = None
+
+
+class IntegrationErrorOut(BaseModel):
+    id: str
+    service: str
+    operation: str
+    error_text: str
+    context_json: dict | None
+    user_id: str | None
+    created_at: datetime
+
+
+class GroupFinalReportRow(BaseModel):
+    full_name: str
+    organization: str | None
+    progress_percent: float
+    average_score: float
+    completion_date: datetime | None
+    certificate_number: str | None
+
+
+class CustomerFinalReportResponse(BaseModel):
+    rows: list[GroupFinalReportRow]
+
+
+class ProgramStatsReportOut(BaseModel):
+    program_id: str
+    program_name: str
+    groups_completed: int
+    average_score: float
+    average_completion_percent: float
+    problem_lessons: list[dict]

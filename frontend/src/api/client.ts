@@ -76,3 +76,26 @@ export async function apiPost<T>(path: string, payload: unknown): Promise<T> {
   });
   return parseResponse<T>(response);
 }
+
+export async function apiGetBlob(path: string): Promise<{ blob: Blob; filename: string | null }> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: buildHeaders(false),
+  });
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const body = (await response.json()) as { detail?: string };
+      if (body?.detail) {
+        detail = body.detail;
+      }
+    } catch {
+      // keep default detail
+    }
+    throw new ApiError(detail, response.status);
+  }
+
+  const contentDisposition = response.headers.get('content-disposition') ?? '';
+  const match = contentDisposition.match(/filename=([^;]+)/i);
+  const filename = match ? match[1].replace(/"/g, '').trim() : null;
+  return { blob: await response.blob(), filename };
+}

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -19,7 +19,17 @@ from app.models.entities import (
     UserRoleLink,
     UserStudentLink,
 )
-from app.models.enums import AssignmentStatus, NotificationChannel, ProgramProgressStatus, ProgressStatus, UserRole
+from app.models.enums import (
+    AssignmentStatus,
+    NotificationChannel,
+    PaymentStatus,
+    ProgramProgressStatus,
+    ProgressStatus,
+    UserRole,
+)
+from app.services.integration_errors import log_integration_error
+from app.services.payments import mark_payment_overdue
+from app.services.telegram import send_telegram_message
 
 
 def _utcnow() -> datetime:
@@ -34,6 +44,35 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+def _notification_exists(db, event_key: str) -> bool:
+    return db.execute(select(Notification.id).where(Notification.event_key == event_key)).first() is not None
+
+
+def _create_db_notification(
+    db,
+    *,
+    recipient_user_id: str,
+    channel: NotificationChannel,
+    subject: str,
+    body: str,
+    link_url: str | None,
+    event_key: str | None,
+) -> bool:
+    if event_key and _notification_exists(db, event_key):
+        return False
+    db.add(
+        Notification(
+            recipient_user_id=recipient_user_id,
+            channel=channel,
+            subject=subject,
+            body=body,
+            link_url=link_url,
+            event_key=event_key,
+        )
+    )
+    return True
+
+
 def create_notification(
     db,
     *,
@@ -43,25 +82,97 @@ def create_notification(
     link_url: str | None = None,
     channels: tuple[NotificationChannel, ...] = (NotificationChannel.in_app, NotificationChannel.email),
     event_key: str | None = None,
+    duplicate_to_telegram: bool = True,
+    fallback_to_email_if_no_telegram: bool = True,
+    fallback_to_email_if_telegram_error: bool = True,
 ) -> int:
     created = 0
-    for channel in channels:
+    user = db.get(User, recipient_user_id)
+    requested_channels = list(dict.fromkeys(channels))
+    created_channels: set[NotificationChannel] = set()
+
+    # All stage-4 notifications are duplicated to Telegram when account is linked.
+    if duplicate_to_telegram and NotificationChannel.telegram not in requested_channels:
+        requested_channels.append(NotificationChannel.telegram)
+
+    for channel in requested_channels:
         resolved_key = f'{event_key}:{channel.value}' if event_key else None
-        if resolved_key:
-            existing = db.execute(select(Notification.id).where(Notification.event_key == resolved_key)).first()
-            if existing:
+
+        if channel == NotificationChannel.telegram:
+            if user is None or not user.telegram_chat_id:
+                # Fallback to email when Telegram is not linked.
+                if fallback_to_email_if_no_telegram and NotificationChannel.email not in created_channels:
+                    fallback_key = f'{event_key}:email-fallback' if event_key else None
+                    if _create_db_notification(
+                        db,
+                        recipient_user_id=recipient_user_id,
+                        channel=NotificationChannel.email,
+                        subject=subject,
+                        body=body,
+                        link_url=link_url,
+                        event_key=fallback_key,
+                    ):
+                        created += 1
+                        created_channels.add(NotificationChannel.email)
                 continue
-        db.add(
-            Notification(
-                recipient_user_id=recipient_user_id,
-                channel=channel,
-                subject=subject,
-                body=body,
-                link_url=link_url,
-                event_key=resolved_key,
-            )
-        )
-        created += 1
+
+            if resolved_key and _notification_exists(db, resolved_key):
+                continue
+
+            try:
+                send_telegram_message(
+                    chat_id=user.telegram_chat_id,
+                    subject=subject,
+                    body=body,
+                    link_url=link_url,
+                )
+                if _create_db_notification(
+                    db,
+                    recipient_user_id=recipient_user_id,
+                    channel=NotificationChannel.telegram,
+                    subject=subject,
+                    body=body,
+                    link_url=link_url,
+                    event_key=resolved_key,
+                ):
+                    created += 1
+                    created_channels.add(NotificationChannel.telegram)
+            except Exception as exc:  # pragma: no cover - depends on external telegram API
+                log_integration_error(
+                    db,
+                    service='telegram',
+                    operation='send_message',
+                    error_text=str(exc),
+                    context={'recipient_user_id': recipient_user_id, 'subject': subject},
+                    user_id=recipient_user_id,
+                )
+                if fallback_to_email_if_telegram_error and NotificationChannel.email not in created_channels:
+                    fallback_key = f'{event_key}:email-fallback' if event_key else None
+                    if _create_db_notification(
+                        db,
+                        recipient_user_id=recipient_user_id,
+                        channel=NotificationChannel.email,
+                        subject=subject,
+                        body=body,
+                        link_url=link_url,
+                        event_key=fallback_key,
+                    ):
+                        created += 1
+                        created_channels.add(NotificationChannel.email)
+            continue
+
+        if _create_db_notification(
+            db,
+            recipient_user_id=recipient_user_id,
+            channel=channel,
+            subject=subject,
+            body=body,
+            link_url=link_url,
+            event_key=resolved_key,
+        ):
+            created += 1
+            created_channels.add(channel)
+
     return created
 
 
@@ -125,9 +236,55 @@ def _completed_lessons_by_enrollment(db, enrollment_ids: list[str]) -> dict[str,
     return dict(completed)
 
 
+def _notify_overdue_payments(db, *, now: datetime) -> int:
+    created_total = 0
+    pending = db.execute(
+        select(Enrollment).where(Enrollment.payment_status == PaymentStatus.pending)
+    ).scalars().all()
+    for enrollment in pending:
+        due_at = _as_utc(enrollment.payment_due_at)
+        if due_at is None or due_at > now:
+            continue
+
+        mark_payment_overdue(enrollment=enrollment)
+
+        student_user = db.execute(
+            select(User)
+            .join(UserStudentLink, UserStudentLink.user_id == User.id)
+            .where(UserStudentLink.student_id == enrollment.student_id)
+        ).scalar_one_or_none()
+        if student_user:
+            created_total += create_notification(
+                db,
+                recipient_user_id=student_user.id,
+                subject='Оплата просрочена',
+                body='Доступ к материалам закрыт до подтверждения оплаты курса.',
+                link_url=enrollment.payment_link,
+                event_key=f'payment-overdue-student-{enrollment.id}-{now.date().isoformat()}',
+                channels=(NotificationChannel.email, NotificationChannel.in_app),
+            )
+
+        admin_ids = db.execute(
+            select(UserRoleLink.user_id).where(UserRoleLink.role == UserRole.admin)
+        ).all()
+        for (admin_id,) in admin_ids:
+            created_total += create_notification(
+                db,
+                recipient_user_id=admin_id,
+                subject='Просроченная оплата по слушателю',
+                body=f'{enrollment.student.full_name} не оплатил курс в течение 3 дней.',
+                link_url=f'/groups/{enrollment.group_id}/progress',
+                event_key=f'payment-overdue-admin-{admin_id}-{enrollment.id}-{now.date().isoformat()}',
+                channels=(NotificationChannel.in_app, NotificationChannel.email),
+            )
+    return created_total
+
+
 def run_scheduled_notifications(db, *, now: datetime | None = None) -> int:
     now = now or _utcnow()
     created_total = 0
+
+    created_total += _notify_overdue_payments(db, now=now)
 
     # Student inactivity > 3 days.
     inactive_students = db.execute(
@@ -166,10 +323,7 @@ def run_scheduled_notifications(db, *, now: datetime | None = None) -> int:
 
     # Teacher reminder for assignments waiting > 2 days.
     stale_submissions = db.execute(
-        select(AssignmentSubmission)
-        .where(
-            AssignmentSubmission.status == AssignmentStatus.submitted,
-        )
+        select(AssignmentSubmission).where(AssignmentSubmission.status == AssignmentStatus.submitted)
     ).scalars().all()
 
     for submission in stale_submissions:
@@ -228,7 +382,9 @@ def run_scheduled_notifications(db, *, now: datetime | None = None) -> int:
                         body=f'{enrollment.student.full_name}: прогресс {round(progress, 2)}%, до конца курса {days_to_end} дн.',
                         link_url=f'/groups/{enrollment.group_id}/progress',
                         event_key=f'curator-lag-{link.user_id}-{enrollment.id}-{now.date().isoformat()}',
-                        channels=(NotificationChannel.in_app,),
+                        channels=(NotificationChannel.telegram,),
+                        duplicate_to_telegram=False,
+                        fallback_to_email_if_no_telegram=False,
                     )
 
             last_login = _as_utc(student_last_login.get(enrollment.student_id))
@@ -267,9 +423,7 @@ def run_scheduled_notifications(db, *, now: datetime | None = None) -> int:
             db,
             recipient_user_id=customer.id,
             subject='Еженедельная сводка по слушателям',
-            body=(
-                f'Завершили: {completed_count}, в процессе: {in_progress_count}, не начали: {not_started_count}.'
-            ),
+            body=f'Завершили: {completed_count}, в процессе: {in_progress_count}, не начали: {not_started_count}.',
             link_url='/progress',
             event_key=f'customer-weekly-{customer.id}-{week_key}',
             channels=(NotificationChannel.in_app, NotificationChannel.email),

@@ -15,6 +15,16 @@ LMS-приложение с авторизацией и разграничени
   - Администратор: пользователи, роли, группы, зачисление, назначения преподавателей/кураторов.
   - Заказчик: только прогресс своих сотрудников (read-only).
 - Сохранены существующие фильтры и экспорт Excel для таблицы слушателей.
+- Интеграции ступени 5:
+  - Telegram: привязка аккаунта по invite-link + дублирование уведомлений.
+  - Календарь: Google Calendar / Яндекс.Календарь / ICS для группы.
+  - Хранилище файлов: материалы уроков и файлы заданий через storage backend (local/S3).
+  - Платежи: платные программы, ссылка на оплату, webhook/mock подтверждение, блокировка доступа до оплаты.
+  - Отчёты:
+    - Админ: итоговый Excel по группе.
+    - Заказчик: итоговый Excel по своим сотрудникам.
+    - Методист: статистика по программе (API).
+  - Журнал ошибок интеграций для администратора.
 
 ## Тестовые логины
 - `admin@lms.local / Admin123!`
@@ -68,3 +78,19 @@ docker compose up -d
 ```
 - Backend: `http://localhost:8000`
 - Frontend: `http://localhost`
+
+## Переменные окружения (интеграции)
+`backend/.env` (или переменные среды):
+- `APP_BASE_URL=http://localhost:8000`
+- `TELEGRAM_BOT_TOKEN=...`
+- `TELEGRAM_BOT_USERNAME=...`
+- `STORAGE_BACKEND=local` или `s3`
+- `STORAGE_LOCAL_PATH=./storage_data`
+- `S3_ENDPOINT_URL=...`
+- `S3_REGION=ru-central1`
+- `S3_ACCESS_KEY_ID=...`
+- `S3_SECRET_ACCESS_KEY=...`
+- `S3_BUCKET_NAME=...`
+- `YOOKASSA_SHOP_ID=...`
+- `YOOKASSA_SECRET_KEY=...`
+- `YOOKASSA_RETURN_URL=http://localhost:80`

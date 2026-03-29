@@ -107,7 +107,7 @@ def _ensure_group(db: Session, program: Program) -> Group:
 def _ensure_student_and_link(db: Session, *, full_name: str, email: str, user: User, group: Group) -> Student:
     student = db.execute(select(Student).where(Student.email == email)).scalar_one_or_none()
     if student is None:
-        student = Student(full_name=full_name, email=email)
+        student = Student(full_name=full_name, email=email, organization='Demo Org')
         db.add(student)
         db.flush()
 

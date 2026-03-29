@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime, timezone
+import uuid
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -256,6 +257,7 @@ def update_program_status_and_certificate(db: Session, enrollment: Enrollment) -
         if enrollment.certification_issued_at is None:
             enrollment.certification_issued_at = _utcnow()
             enrollment.certificate_url = f'/api/certificates/{enrollment.id}/download'
+            enrollment.certificate_number = f'CERT-{uuid.uuid4().hex[:10].upper()}'
             issued_now = True
     elif enrollment.program_status != ProgramProgressStatus.not_started:
         enrollment.program_status = ProgramProgressStatus.in_progress

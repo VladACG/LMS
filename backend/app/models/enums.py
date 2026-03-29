@@ -39,3 +39,11 @@ class AssignmentStatus(str, Enum):
 class NotificationChannel(str, Enum):
     in_app = 'in_app'
     email = 'email'
+    telegram = 'telegram'
+
+
+class PaymentStatus(str, Enum):
+    not_required = 'not_required'
+    pending = 'pending'
+    paid = 'paid'
+    overdue = 'overdue'

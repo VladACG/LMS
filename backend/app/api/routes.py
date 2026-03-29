@@ -1,12 +1,16 @@
 ﻿from __future__ import annotations
 
-from datetime import datetime, timezone
+import io
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.core.security import (
     AuthContext,
     create_access_token,
@@ -24,7 +28,9 @@ from app.models.entities import (
     CustomerStudentLink,
     Enrollment,
     Group,
+    IntegrationErrorLog,
     Lesson,
+    LessonMaterial,
     LessonProgress,
     Module,
     Notification,
@@ -38,24 +44,29 @@ from app.models.entities import (
     UserRoleLink,
     UserStudentLink,
 )
-from app.models.enums import AssignmentStatus, NotificationChannel, ProgressStatus, UserRole
+from app.models.enums import AssignmentStatus, NotificationChannel, PaymentStatus, ProgressStatus, UserRole
 from app.schemas.lms import (
     AuditEventOut,
     AutomationRunResult,
     AssignmentOut,
     AssignmentReviewRequest,
     AssignmentSubmitRequest,
+    CalendarLinksOut,
     CertificateOut,
     ChangePasswordRequest,
     CompleteLessonResponse,
+    CustomerFinalReportResponse,
     CustomerStudentAssignRequest,
     EnrollmentCreate,
     EnrollmentOut,
     GroupCreate,
+    GroupFinalReportRow,
     GroupOut,
     GroupProgressResponse,
     GroupProgressRow,
     GroupUserAssignRequest,
+    IntegrationErrorOut,
+    LessonMaterialOut,
     LessonEngagementRequest,
     LessonCreate,
     LessonOut,
@@ -67,9 +78,12 @@ from app.schemas.lms import (
     ModuleOut,
     NotificationMarkReadRequest,
     NotificationOut,
+    PaymentOut,
+    PaymentWebhookRequest,
     ProgramCreate,
     ProgramDetailOut,
     ProgramOut,
+    ProgramStatsReportOut,
     ProgressTableResponse,
     QuestionAnswerRequest,
     QuestionCreateRequest,
@@ -78,6 +92,8 @@ from app.schemas.lms import (
     ReminderSendRequest,
     StudentLessonsResponse,
     StudentLessonOut,
+    TelegramConfirmRequest,
+    TelegramLinkOut,
     TestAttemptRequest,
     TestAttemptResponse,
     TestAttemptsOverrideRequest,
@@ -88,18 +104,34 @@ from app.schemas.lms import (
     UserRoleUpdate,
 )
 from app.services.audit import log_audit
+from app.services.calendar import build_google_calendar_link, build_ics_content, build_yandex_calendar_link
+from app.services.integration_errors import log_integration_error
 from app.services.notifications import create_notification, run_scheduled_notifications
+from app.services.payments import (
+    apply_paid_program_on_enrollment,
+    create_payment_link,
+    mark_payment_paid,
+    mark_payment_overdue,
+)
 from app.services.progress import (
     complete_content_lesson,
     enrollment_metrics,
     get_next_required_lesson_id,
-    mark_program_started,
     open_lesson,
     register_test_attempt,
     set_assignment_result,
     set_assignment_waiting,
     update_program_status_and_certificate,
 )
+from app.services.reports import enrollment_score_stats, lesson_problem_stats
+from app.services.storage import (
+    ASSIGNMENT_MAX_SIZE_BYTES,
+    generate_download_url,
+    is_assignment_file_allowed,
+    local_file_path,
+    upload_bytes,
+)
+from app.services.telegram import link_telegram_account, telegram_invite_url
 
 router = APIRouter(prefix='/api', tags=['lms'])
 
@@ -116,25 +148,45 @@ def _lesson_content(payload: LessonCreate) -> dict:
     if payload.type.value == 'video':
         if payload.video_url is None:
             raise HTTPException(status_code=422, detail='video_url is required for video lesson')
-        return {'video_url': str(payload.video_url)}
+        content = {'video_url': str(payload.video_url)}
+        if payload.webinar_start_at:
+            content['webinar_start_at'] = payload.webinar_start_at.isoformat()
+        if payload.webinar_join_url:
+            content['webinar_join_url'] = str(payload.webinar_join_url)
+        return content
     if payload.type.value == 'text':
         if not payload.text_body:
             raise HTTPException(status_code=422, detail='text_body is required for text lesson')
-        return {'text_body': payload.text_body}
+        content = {'text_body': payload.text_body}
+        if payload.webinar_start_at:
+            content['webinar_start_at'] = payload.webinar_start_at.isoformat()
+        if payload.webinar_join_url:
+            content['webinar_join_url'] = str(payload.webinar_join_url)
+        return content
     if payload.type.value == 'test':
         if payload.questions_json is None:
             raise HTTPException(status_code=422, detail='questions_json is required for test lesson')
-        return {
+        content = {
             'questions': payload.questions_json,
             'pass_score': payload.test_pass_score,
             'max_attempts': payload.test_max_attempts,
         }
+        if payload.webinar_start_at:
+            content['webinar_start_at'] = payload.webinar_start_at.isoformat()
+        if payload.webinar_join_url:
+            content['webinar_join_url'] = str(payload.webinar_join_url)
+        return content
     if payload.type.value == 'assignment':
-        return {'assignment_pass_score': payload.assignment_pass_score}
+        content = {'assignment_pass_score': payload.assignment_pass_score}
+        if payload.webinar_start_at:
+            content['webinar_start_at'] = payload.webinar_start_at.isoformat()
+        if payload.webinar_join_url:
+            content['webinar_join_url'] = str(payload.webinar_join_url)
+        return content
     raise HTTPException(status_code=422, detail='Unsupported lesson type')
 
 
-def _find_or_create_student(db: Session, full_name: str, email: str | None) -> Student:
+def _find_or_create_student(db: Session, full_name: str, email: str | None, organization: str | None = None) -> Student:
     student = None
     if email:
         student = db.execute(select(Student).where(Student.email == email)).scalar_one_or_none()
@@ -148,9 +200,11 @@ def _find_or_create_student(db: Session, full_name: str, email: str | None) -> S
             student = db.execute(select(Student).where(Student.full_name == full_name, Student.email == email)).scalar_one_or_none()
 
     if student is None:
-        student = Student(full_name=full_name, email=email)
+        student = Student(full_name=full_name, email=email, organization=organization)
         db.add(student)
         db.flush()
+    elif organization and not student.organization:
+        student.organization = organization
 
     return student
 
@@ -224,6 +278,7 @@ def _build_progress_row(
     completed_count: int,
     last_activity: datetime | None,
     last_login_at: datetime | None,
+    average_score: float = 0.0,
 ) -> GroupProgressRow:
     progress_percent = round((completed_count / total_lessons) * 100, 2) if total_lessons else 0.0
     return GroupProgressRow(
@@ -242,6 +297,11 @@ def _build_progress_row(
         last_login_at=last_login_at,
         program_status=enrollment.program_status.value,
         certificate_available=enrollment.certification_issued_at is not None,
+        organization=enrollment.student.organization,
+        average_score=average_score,
+        completion_date=enrollment.certification_issued_at,
+        certificate_number=enrollment.certificate_number,
+        payment_status=enrollment.payment_status,
     )
 
 
@@ -285,6 +345,8 @@ def _user_profile(user: User) -> UserProfileOut:
         blocked=user.blocked,
         temp_password_required=user.temp_password_required,
         student_id=student_id,
+        telegram_linked=bool(user.telegram_chat_id),
+        telegram_username=user.telegram_username,
     )
 
 
@@ -296,6 +358,7 @@ def _user_out(user: User) -> UserOut:
         blocked=user.blocked,
         temp_password_required=user.temp_password_required,
         roles=_user_roles(user),
+        telegram_linked=bool(user.telegram_chat_id),
     )
 
 
@@ -422,7 +485,7 @@ def _assert_enrollment_access(
     enrollment = db.execute(
         select(Enrollment)
         .where(Enrollment.group_id == group_id, Enrollment.student_id == student_id)
-        .options(selectinload(Enrollment.group))
+        .options(selectinload(Enrollment.group).selectinload(Group.program))
     ).scalar_one_or_none()
     if not enrollment:
         raise HTTPException(status_code=404, detail='Enrollment not found')
@@ -431,6 +494,11 @@ def _assert_enrollment_access(
         return enrollment
 
     if has_role(ctx, UserRole.student.value) and _student_id_for_user(ctx) == student_id:
+        if enrollment.group.program.is_paid and enrollment.payment_status != PaymentStatus.paid:
+            raise HTTPException(
+                status_code=402,
+                detail='Payment is required before access to course materials',
+            )
         return enrollment
 
     if not write and has_role(ctx, UserRole.teacher.value) and group_id in _teacher_group_ids(db, ctx.user.id):
@@ -443,6 +511,7 @@ def _assert_enrollment_access(
 
 
 def _assignment_out(item: AssignmentSubmission) -> AssignmentOut:
+    download_url = generate_download_url(item.file_key) if item.file_key else None
     return AssignmentOut(
         id=item.id,
         student_id=item.enrollment.student_id,
@@ -460,6 +529,10 @@ def _assignment_out(item: AssignmentSubmission) -> AssignmentOut:
         reviewed_by_user_id=item.reviewed_by_user_id,
         reviewed_at=item.reviewed_at,
         student_viewed_at=item.student_viewed_at,
+        file_name=item.file_name,
+        file_mime=item.file_mime,
+        file_size_bytes=item.file_size_bytes,
+        file_download_url=download_url,
     )
 
 
@@ -501,6 +574,67 @@ def _audit_out(item: AuditEvent) -> AuditEventOut:
         payload_json=item.payload_json,
         created_at=item.created_at,
     )
+
+
+def _material_out(item: LessonMaterial) -> LessonMaterialOut:
+    return LessonMaterialOut(
+        id=item.id,
+        lesson_id=item.lesson_id,
+        file_name=item.file_name,
+        file_mime=item.file_mime,
+        file_size_bytes=item.file_size_bytes,
+        uploaded_at=item.uploaded_at,
+        download_url=generate_download_url(item.file_key),
+    )
+
+
+def _payment_out(enrollment: Enrollment) -> PaymentOut:
+    return PaymentOut(
+        enrollment_id=enrollment.id,
+        payment_status=enrollment.payment_status,
+        payment_link=enrollment.payment_link,
+        payment_due_at=enrollment.payment_due_at,
+        payment_confirmed_at=enrollment.payment_confirmed_at,
+    )
+
+
+def _build_excel_bytes(*, sheet_title: str, headers: list[str], rows: list[list[object | None]]) -> bytes:
+    try:
+        from openpyxl import Workbook
+    except Exception as exc:  # pragma: no cover - dependency import path
+        raise HTTPException(
+            status_code=500,
+            detail='openpyxl is not installed on server',
+        ) from exc
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_title
+    ws.append(headers)
+    for row in rows:
+        ws.append(row)
+
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+
+def _notify_payment_confirmed(db: Session, enrollment: Enrollment) -> None:
+    student_user = db.execute(
+        select(User)
+        .join(UserStudentLink, UserStudentLink.user_id == User.id)
+        .where(UserStudentLink.student_id == enrollment.student_id)
+    ).scalar_one_or_none()
+    if student_user:
+        create_notification(
+            db,
+            recipient_user_id=student_user.id,
+            subject='Оплата подтверждена',
+            body='Платёж получен. Доступ к урокам открыт.',
+            link_url=f'/groups/{enrollment.group_id}',
+            event_key=f'payment-confirmed-{enrollment.id}',
+        )
+
 
 @router.post('/auth/login', response_model=LoginResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
@@ -555,6 +689,40 @@ def change_password(
     return MessageOut(message='Password changed successfully')
 
 
+@router.get('/telegram/link', response_model=TelegramLinkOut)
+def get_telegram_link(
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+):
+    db.refresh(ctx.user)
+    invite_url = telegram_invite_url(ctx.user)
+    db.commit()
+    return TelegramLinkOut(
+        invite_url=invite_url,
+        linked=bool(ctx.user.telegram_chat_id),
+        telegram_username=ctx.user.telegram_username,
+    )
+
+
+@router.post('/telegram/confirm', response_model=MessageOut)
+def confirm_telegram_link(payload: TelegramConfirmRequest, db: Session = Depends(get_db)):
+    user = db.execute(select(User).where(User.telegram_link_token == payload.token)).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail='Telegram link token is invalid or expired')
+
+    link_telegram_account(user=user, chat_id=payload.chat_id, username=payload.username)
+    log_audit(
+        db,
+        actor_user_id=user.id,
+        event_type='telegram_linked',
+        entity_type='user',
+        entity_id=user.id,
+        payload={'telegram_username': payload.username, 'chat_id': payload.chat_id},
+    )
+    db.commit()
+    return MessageOut(message='Telegram account linked')
+
+
 @router.get('/users', response_model=list[UserOut])
 def list_users(_ctx: AuthContext = Depends(require_roles(UserRole.admin.value)), db: Session = Depends(get_db)):
     users = db.execute(select(User).options(selectinload(User.roles), selectinload(User.student_link))).scalars().all()
@@ -589,9 +757,11 @@ def create_user(
     if UserRole.student in roles:
         student = db.execute(select(Student).where(Student.email == email)).scalar_one_or_none()
         if student is None:
-            student = Student(full_name=payload.full_name, email=email)
+            student = Student(full_name=payload.full_name, email=email, organization=payload.organization)
             db.add(student)
             db.flush()
+        elif payload.organization and not student.organization:
+            student.organization = payload.organization
         db.add(UserStudentLink(user_id=user.id, student_id=student.id))
 
     create_notification(
@@ -694,6 +864,8 @@ def create_program(
         strict_order=payload.strict_order,
         certification_progress_threshold=payload.certification_progress_threshold,
         certification_min_avg_score=payload.certification_min_avg_score,
+        is_paid=payload.is_paid,
+        price_amount=payload.price_amount,
     )
     db.add(obj)
     db.commit()
@@ -707,6 +879,8 @@ def create_program(
         strict_order=obj.strict_order,
         certification_progress_threshold=obj.certification_progress_threshold,
         certification_min_avg_score=obj.certification_min_avg_score,
+        is_paid=obj.is_paid,
+        price_amount=obj.price_amount,
     )
 
 
@@ -746,6 +920,8 @@ def list_programs(
             strict_order=program.strict_order,
             certification_progress_threshold=program.certification_progress_threshold,
             certification_min_avg_score=program.certification_min_avg_score,
+            is_paid=program.is_paid,
+            price_amount=program.price_amount,
         )
         rows.append(row)
 
@@ -800,6 +976,8 @@ def get_program(program_id: str, ctx: AuthContext = Depends(get_auth_context), d
         'strict_order': program.strict_order,
         'certification_progress_threshold': program.certification_progress_threshold,
         'certification_min_avg_score': program.certification_min_avg_score,
+        'is_paid': program.is_paid,
+        'price_amount': program.price_amount,
         'modules': modules_out,
     }
 
@@ -846,6 +1024,176 @@ def create_lesson(
     return lesson
 
 
+@router.post('/lessons/{lesson_id}/materials/upload', response_model=LessonMaterialOut, status_code=201)
+async def upload_lesson_material(
+    lesson_id: str,
+    file: UploadFile = File(...),
+    ctx: AuthContext = Depends(require_roles(UserRole.admin.value, UserRole.methodist.value)),
+    db: Session = Depends(get_db),
+):
+    lesson = db.execute(
+        select(Lesson)
+        .where(Lesson.id == lesson_id)
+        .options(selectinload(Lesson.module).selectinload(Module.program))
+    ).scalar_one_or_none()
+    if not lesson:
+        raise HTTPException(status_code=404, detail='Lesson not found')
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=422, detail='File is empty')
+
+    try:
+        stored = upload_bytes(
+            key_prefix=f'materials/{lesson_id}',
+            file_name=file.filename or 'material.bin',
+            data=file_bytes,
+            content_type=file.content_type or 'application/octet-stream',
+        )
+    except Exception as exc:
+        log_integration_error(
+            db,
+            service='storage',
+            operation='upload_lesson_material',
+            error_text=str(exc),
+            context={'lesson_id': lesson_id, 'file_name': file.filename},
+            user_id=ctx.user.id,
+        )
+        raise HTTPException(status_code=503, detail='Material storage is temporarily unavailable') from exc
+
+    material = LessonMaterial(
+        lesson_id=lesson.id,
+        file_name=str(stored['file_name']),
+        file_key=str(stored['key']),
+        file_mime=str(stored['content_type']),
+        file_size_bytes=int(stored['size_bytes']),
+        uploaded_by_user_id=ctx.user.id,
+    )
+    db.add(material)
+    db.flush()
+    log_audit(
+        db,
+        actor_user_id=ctx.user.id,
+        event_type='lesson_material_uploaded',
+        entity_type='lesson_material',
+        entity_id=material.id,
+        payload={'lesson_id': lesson.id, 'file_name': material.file_name, 'file_size_bytes': material.file_size_bytes},
+    )
+    db.commit()
+    db.refresh(material)
+    return _material_out(material)
+
+
+@router.get('/lessons/{lesson_id}/materials', response_model=list[LessonMaterialOut])
+def list_lesson_materials(
+    lesson_id: str,
+    group_id: str | None = None,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+):
+    lesson = db.execute(
+        select(Lesson)
+        .where(Lesson.id == lesson_id)
+        .options(selectinload(Lesson.module).selectinload(Module.program))
+    ).scalar_one_or_none()
+    if not lesson:
+        raise HTTPException(status_code=404, detail='Lesson not found')
+
+    if not has_role(ctx, UserRole.admin.value) and not has_role(ctx, UserRole.methodist.value):
+        allowed_programs = _allowed_program_ids(ctx, db)
+        if lesson.module.program_id not in allowed_programs:
+            raise HTTPException(status_code=403, detail='Forbidden for current role')
+
+    if has_role(ctx, UserRole.student.value) and not has_role(ctx, UserRole.admin.value):
+        if not group_id:
+            raise HTTPException(status_code=422, detail='group_id is required for student material access')
+        enrollment = _assert_enrollment_access(
+            ctx,
+            db,
+            student_id=_student_id_for_user(ctx),
+            group_id=group_id,
+            write=False,
+        )
+        if enrollment.group.program_id != lesson.module.program_id:
+            raise HTTPException(status_code=403, detail='Forbidden for current role')
+
+    rows = db.execute(
+        select(LessonMaterial).where(LessonMaterial.lesson_id == lesson.id)
+    ).scalars().all()
+    rows.sort(key=lambda item: item.uploaded_at, reverse=True)
+    return [_material_out(item) for item in rows]
+
+
+@router.get('/storage/local/{key:path}')
+def download_local_storage_file(
+    key: str,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+):
+    if settings.storage_backend.lower() != 'local':
+        raise HTTPException(status_code=404, detail='Local storage endpoint is disabled')
+
+    assignment = db.execute(
+        select(AssignmentSubmission)
+        .where(AssignmentSubmission.file_key == key)
+        .options(
+            selectinload(AssignmentSubmission.enrollment).selectinload(Enrollment.group).selectinload(Group.program),
+        )
+    ).scalar_one_or_none()
+    if assignment:
+        if not has_role(ctx, UserRole.admin.value):
+            allowed = False
+            if has_role(ctx, UserRole.student.value) and ctx.user.student_link:
+                allowed = assignment.enrollment.student_id == ctx.user.student_link.student_id
+            if has_role(ctx, UserRole.teacher.value) and assignment.enrollment.group_id in _teacher_group_ids(db, ctx.user.id):
+                allowed = True
+            if has_role(ctx, UserRole.curator.value) and assignment.enrollment.group_id in _curator_group_ids(db, ctx.user.id):
+                allowed = True
+            if not allowed:
+                raise HTTPException(status_code=403, detail='Forbidden for current role')
+    else:
+        material = db.execute(
+            select(LessonMaterial)
+            .where(LessonMaterial.file_key == key)
+            .join(Lesson, Lesson.id == LessonMaterial.lesson_id)
+            .join(Module, Module.id == Lesson.module_id)
+            .join(Program, Program.id == Module.program_id)
+        ).scalar_one_or_none()
+        if not material:
+            raise HTTPException(status_code=404, detail='File not found')
+
+        if not has_role(ctx, UserRole.admin.value) and not has_role(ctx, UserRole.methodist.value):
+            allowed_programs = _allowed_program_ids(ctx, db)
+            lesson_program_id = db.execute(
+                select(Module.program_id).join(Lesson, Lesson.module_id == Module.id).where(Lesson.id == material.lesson_id)
+            ).scalar_one()
+            if lesson_program_id not in allowed_programs:
+                raise HTTPException(status_code=403, detail='Forbidden for current role')
+
+            if has_role(ctx, UserRole.student.value) and ctx.user.student_link:
+                enrollment = db.execute(
+                    select(Enrollment)
+                    .join(Group, Group.id == Enrollment.group_id)
+                    .where(
+                        Enrollment.student_id == ctx.user.student_link.student_id,
+                        Group.program_id == lesson_program_id,
+                    )
+                    .options(selectinload(Enrollment.group).selectinload(Group.program))
+                ).scalars().first()
+                if not enrollment:
+                    raise HTTPException(status_code=403, detail='Forbidden for current role')
+                if enrollment.group.program.is_paid and enrollment.payment_status != PaymentStatus.paid:
+                    raise HTTPException(status_code=402, detail='Payment is required before access to course materials')
+
+    try:
+        file_path = local_file_path(key)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail='File not found') from exc
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail='File not found')
+    return FileResponse(path=file_path)
+
+
 @router.post('/groups', response_model=GroupOut, status_code=201)
 def create_group(
     payload: GroupCreate,
@@ -885,17 +1233,24 @@ def list_groups(ctx: AuthContext = Depends(get_auth_context), db: Session = Depe
 def create_enrollments(
     group_id: str,
     payload: EnrollmentCreate,
-    _ctx: AuthContext = Depends(require_roles(UserRole.admin.value)),
+    ctx: AuthContext = Depends(require_roles(UserRole.admin.value)),
     db: Session = Depends(get_db),
 ):
-    group = db.get(Group, group_id)
+    group = db.execute(
+        select(Group).where(Group.id == group_id).options(selectinload(Group.program))
+    ).scalar_one_or_none()
     if not group:
         raise HTTPException(status_code=404, detail='Group not found')
 
     created: list[EnrollmentOut] = []
     for student_payload in payload.students:
         normalized_email = _normalize_email(student_payload.email) if student_payload.email else None
-        student = _find_or_create_student(db, student_payload.full_name, normalized_email)
+        student = _find_or_create_student(
+            db,
+            student_payload.full_name,
+            normalized_email,
+            student_payload.organization,
+        )
 
         exists = db.execute(
             select(Enrollment).where(Enrollment.group_id == group.id, Enrollment.student_id == student.id)
@@ -906,17 +1261,23 @@ def create_enrollments(
         enrollment = Enrollment(group_id=group.id, student_id=student.id)
         db.add(enrollment)
         db.flush()
+        apply_paid_program_on_enrollment(db, enrollment=enrollment, actor_user_id=ctx.user.id)
 
         student_user = db.execute(
             select(User).join(UserStudentLink, UserStudentLink.user_id == User.id).where(UserStudentLink.student_id == student.id)
         ).scalar_one_or_none()
         log_audit(
             db,
-            actor_user_id=_ctx.user.id,
+            actor_user_id=ctx.user.id,
             event_type='enrollment_created',
             entity_type='enrollment',
             entity_id=enrollment.id,
-            payload={'group_id': group.id, 'student_id': student.id},
+            payload={
+                'group_id': group.id,
+                'student_id': student.id,
+                'payment_status': enrollment.payment_status.value,
+                'is_paid_program': group.program.is_paid,
+            },
         )
         if student_user:
             curator_names = db.execute(
@@ -933,6 +1294,11 @@ def create_enrollments(
                     f'Программа: {group.program.name}. '
                     f'Дата начала: {group.start_date.date().isoformat() if group.start_date else "не указана"}. '
                     f'Куратор: {curator_name}.'
+                    + (
+                        f' Ссылка на оплату: {enrollment.payment_link}.'
+                        if enrollment.payment_status == PaymentStatus.pending and enrollment.payment_link
+                        else ''
+                    )
                 ),
                 link_url=f'/groups/{group.id}',
                 event_key=f'enroll-{group.id}-{student.id}',
@@ -944,11 +1310,152 @@ def create_enrollments(
                 student_id=student.id,
                 full_name=student.full_name,
                 email=student.email,
+                organization=student.organization,
+                payment_status=enrollment.payment_status,
+                payment_link=enrollment.payment_link,
             )
         )
 
     db.commit()
     return created
+
+
+@router.get('/payments/{enrollment_id}', response_model=PaymentOut)
+def get_payment_status(
+    enrollment_id: str,
+    ctx: AuthContext = Depends(require_roles(UserRole.admin.value, UserRole.student.value)),
+    db: Session = Depends(get_db),
+):
+    enrollment = db.execute(
+        select(Enrollment)
+        .where(Enrollment.id == enrollment_id)
+        .options(selectinload(Enrollment.group).selectinload(Group.program))
+    ).scalar_one_or_none()
+    if not enrollment:
+        raise HTTPException(status_code=404, detail='Enrollment not found')
+
+    if has_role(ctx, UserRole.student.value) and not has_role(ctx, UserRole.admin.value):
+        if _student_id_for_user(ctx) != enrollment.student_id:
+            raise HTTPException(status_code=403, detail='Forbidden for current role')
+
+    return _payment_out(enrollment)
+
+
+@router.post('/payments/{enrollment_id}/refresh-link', response_model=PaymentOut)
+def refresh_payment_link(
+    enrollment_id: str,
+    ctx: AuthContext = Depends(require_roles(UserRole.admin.value)),
+    db: Session = Depends(get_db),
+):
+    enrollment = db.execute(
+        select(Enrollment)
+        .where(Enrollment.id == enrollment_id)
+        .options(selectinload(Enrollment.group).selectinload(Group.program))
+    ).scalar_one_or_none()
+    if not enrollment:
+        raise HTTPException(status_code=404, detail='Enrollment not found')
+    if not enrollment.group.program.is_paid:
+        raise HTTPException(status_code=422, detail='Program is not paid')
+    if enrollment.payment_status == PaymentStatus.paid:
+        raise HTTPException(status_code=409, detail='Payment is already confirmed')
+
+    price = enrollment.group.program.price_amount or 0.0
+    enrollment.payment_status = PaymentStatus.pending
+    enrollment.payment_link = create_payment_link(
+        db,
+        enrollment_id=enrollment.id,
+        amount=price,
+        description=f'Оплата курса {enrollment.group.program.name}',
+        user_id=ctx.user.id,
+    )
+    enrollment.payment_due_at = _utcnow() + timedelta(days=3)
+    enrollment.payment_confirmed_at = None
+    enrollment.payment_provider = 'yookassa'
+
+    log_audit(
+        db,
+        actor_user_id=ctx.user.id,
+        event_type='payment_link_refreshed',
+        entity_type='enrollment',
+        entity_id=enrollment.id,
+        payload={'payment_link': enrollment.payment_link},
+    )
+    db.commit()
+    db.refresh(enrollment)
+    return _payment_out(enrollment)
+
+
+@router.post('/payments/webhook', response_model=MessageOut)
+def payment_webhook(payload: PaymentWebhookRequest, db: Session = Depends(get_db)):
+    enrollment = db.execute(
+        select(Enrollment)
+        .where(Enrollment.id == payload.enrollment_id)
+        .options(selectinload(Enrollment.group).selectinload(Group.program))
+    ).scalar_one_or_none()
+    if not enrollment:
+        raise HTTPException(status_code=404, detail='Enrollment not found')
+
+    previous = enrollment.payment_status
+    if payload.status == 'paid':
+        mark_payment_paid(enrollment=enrollment, external_id=payload.external_id)
+        _notify_payment_confirmed(db, enrollment)
+    elif payload.status == 'pending':
+        enrollment.payment_status = PaymentStatus.pending
+        enrollment.payment_confirmed_at = None
+        if enrollment.payment_due_at is None:
+            enrollment.payment_due_at = _utcnow() + timedelta(days=3)
+    else:
+        mark_payment_overdue(enrollment=enrollment)
+
+    log_audit(
+        db,
+        actor_user_id=None,
+        event_type='payment_status_changed',
+        entity_type='enrollment',
+        entity_id=enrollment.id,
+        from_status=previous.value,
+        to_status=enrollment.payment_status.value,
+        payload={'external_id': payload.external_id, 'provider_status': payload.status},
+    )
+    db.commit()
+    return MessageOut(message='Payment webhook accepted')
+
+
+@router.get('/payments/mock/{enrollment_id}')
+def mock_payment_page(enrollment_id: str, confirm: bool = False, db: Session = Depends(get_db)):
+    enrollment = db.execute(
+        select(Enrollment)
+        .where(Enrollment.id == enrollment_id)
+        .options(selectinload(Enrollment.group).selectinload(Group.program))
+    ).scalar_one_or_none()
+    if not enrollment:
+        raise HTTPException(status_code=404, detail='Enrollment not found')
+
+    previous = enrollment.payment_status
+    if confirm and enrollment.payment_status != PaymentStatus.paid:
+        mark_payment_paid(enrollment=enrollment, external_id='mock')
+        _notify_payment_confirmed(db, enrollment)
+        log_audit(
+            db,
+            actor_user_id=None,
+            event_type='payment_status_changed',
+            entity_type='enrollment',
+            entity_id=enrollment.id,
+            from_status=previous.value,
+            to_status=PaymentStatus.paid.value,
+            payload={'provider': 'mock'},
+        )
+        db.commit()
+
+    link = f'{settings.app_base_url}/api/payments/mock/{enrollment.id}?confirm=true'
+    html = (
+        '<html><body style="font-family:Arial,sans-serif;padding:20px">'
+        f'<h2>Оплата курса: {enrollment.group.program.name}</h2>'
+        f'<p>Статус оплаты: <strong>{enrollment.payment_status.value}</strong></p>'
+        f'<p><a href="{link}">Подтвердить оплату (mock)</a></p>'
+        '</body></html>'
+    )
+    return Response(content=html, media_type='text/html; charset=utf-8')
 
 
 @router.post('/groups/{group_id}/teachers', response_model=MessageOut)
@@ -1100,7 +1607,75 @@ def get_student_lessons(
         total=len(lessons_out),
         completed=completed_count,
         program_status=enrollment.program_status.value,
+        payment_status=enrollment.payment_status,
+        payment_required=enrollment.group.program.is_paid,
+        payment_link=enrollment.payment_link,
         lessons=lessons_out,
+    )
+
+
+@router.get('/students/{student_id}/calendar-links', response_model=CalendarLinksOut)
+def get_calendar_links(
+    student_id: str,
+    group_id: str,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+):
+    enrollment = _assert_enrollment_access(ctx, db, student_id=student_id, group_id=group_id, write=False)
+    lessons = db.execute(
+        select(Lesson)
+        .join(Module, Module.id == Lesson.module_id)
+        .where(Module.program_id == enrollment.group.program_id)
+        .order_by(Module.order_index.asc(), Lesson.order_index.asc())
+    ).scalars().all()
+
+    google_url = build_google_calendar_link(group=enrollment.group, lessons=lessons)
+    yandex_url = build_yandex_calendar_link(group=enrollment.group, lessons=lessons)
+    ics_url = f'{settings.app_base_url}/api/students/{student_id}/calendar.ics?group_id={group_id}'
+    return CalendarLinksOut(google_url=google_url, yandex_url=yandex_url, ics_url=ics_url)
+
+
+@router.get('/students/{student_id}/payment', response_model=PaymentOut)
+def get_student_group_payment(
+    student_id: str,
+    group_id: str,
+    ctx: AuthContext = Depends(require_roles(UserRole.admin.value, UserRole.student.value)),
+    db: Session = Depends(get_db),
+):
+    enrollment = db.execute(
+        select(Enrollment)
+        .where(Enrollment.group_id == group_id, Enrollment.student_id == student_id)
+        .options(selectinload(Enrollment.group).selectinload(Group.program))
+    ).scalar_one_or_none()
+    if not enrollment:
+        raise HTTPException(status_code=404, detail='Enrollment not found')
+
+    if has_role(ctx, UserRole.student.value) and not has_role(ctx, UserRole.admin.value):
+        if _student_id_for_user(ctx) != student_id:
+            raise HTTPException(status_code=403, detail='Forbidden for current role')
+    return _payment_out(enrollment)
+
+
+@router.get('/students/{student_id}/calendar.ics')
+def download_calendar_ics(
+    student_id: str,
+    group_id: str,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+):
+    enrollment = _assert_enrollment_access(ctx, db, student_id=student_id, group_id=group_id, write=False)
+    lessons = db.execute(
+        select(Lesson)
+        .join(Module, Module.id == Lesson.module_id)
+        .where(Module.program_id == enrollment.group.program_id)
+        .order_by(Module.order_index.asc(), Lesson.order_index.asc())
+    ).scalars().all()
+    content = build_ics_content(group=enrollment.group, lessons=lessons)
+    file_name = f'course-{enrollment.group.id}.ics'
+    return Response(
+        content=content,
+        media_type='text/calendar; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename={file_name}'},
     )
 
 
@@ -1408,6 +1983,7 @@ def my_certificates(
             enrollment_id=item.id,
             certificate_url=item.certificate_url or f'/api/certificates/{item.id}/download',
             issued_at=item.certification_issued_at,
+            certificate_number=item.certificate_number,
         )
         for item in enrollments
         if item.certification_issued_at is not None
@@ -1435,6 +2011,7 @@ def download_certificate(
         enrollment_id=enrollment.id,
         certificate_url=enrollment.certificate_url,
         issued_at=enrollment.certification_issued_at,
+        certificate_number=enrollment.certificate_number,
     )
 
 
@@ -1470,6 +2047,7 @@ def group_progress(
     rows: list[GroupProgressRow] = []
     for enrollment in enrollments:
         stat = completed_stats.get(enrollment.id, {'completed_count': 0, 'last_activity': None})
+        metrics = enrollment_metrics(db, enrollment)
         rows.append(
             _build_progress_row(
                 enrollment=enrollment,
@@ -1477,6 +2055,7 @@ def group_progress(
                 completed_count=int(stat['completed_count']),
                 last_activity=stat['last_activity'] if isinstance(stat['last_activity'], datetime) else None,
                 last_login_at=last_login_map.get(enrollment.student_id),
+                average_score=float(metrics['avg_score']),
             )
         )
 
@@ -1534,12 +2113,14 @@ def list_progress(
     rows: list[GroupProgressRow] = []
     for enrollment in enrollments:
         stat = completed_stats.get(enrollment.id, {'completed_count': 0, 'last_activity': None})
+        metrics = enrollment_metrics(db, enrollment)
         row = _build_progress_row(
             enrollment=enrollment,
             total_lessons=lesson_totals.get(enrollment.group.program_id, 0),
             completed_count=int(stat['completed_count']),
             last_activity=stat['last_activity'] if isinstance(stat['last_activity'], datetime) else None,
             last_login_at=last_login_map.get(enrollment.student_id),
+            average_score=float(metrics['avg_score']),
         )
         rows.append(row)
 
@@ -1557,6 +2138,249 @@ def list_progress(
 
     return ProgressTableResponse(rows=rows)
 
+
+@router.get('/reports/groups/{group_id}/final.xlsx')
+def export_group_final_report(
+    group_id: str,
+    ctx: AuthContext = Depends(require_roles(UserRole.admin.value)),
+    db: Session = Depends(get_db),
+):
+    group = db.execute(
+        select(Group)
+        .where(Group.id == group_id)
+        .options(
+            selectinload(Group.program),
+            selectinload(Group.enrollments).selectinload(Enrollment.student),
+        )
+    ).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail='Group not found')
+
+    total_lessons = _collect_program_lesson_totals(db, [group.program_id]).get(group.program_id, 0)
+    excel_rows: list[list[object | None]] = []
+    for enrollment in sorted(group.enrollments, key=lambda item: item.student.full_name):
+        progress_percent, avg_score, _completed = enrollment_score_stats(
+            db,
+            enrollment.id,
+            total_lessons=total_lessons,
+        )
+        excel_rows.append(
+            [
+                enrollment.student.full_name,
+                enrollment.student.organization,
+                progress_percent,
+                avg_score,
+                enrollment.certification_issued_at.isoformat() if enrollment.certification_issued_at else None,
+                enrollment.certificate_number,
+            ]
+        )
+
+    xlsx = _build_excel_bytes(
+        sheet_title='Group report',
+        headers=[
+            'ФИО слушателя',
+            'Организация',
+            'Прогресс %',
+            'Средний балл',
+            'Дата завершения',
+            'Номер сертификата',
+        ],
+        rows=excel_rows,
+    )
+    file_name = f'group-{group.id}-final-report.xlsx'
+    log_audit(
+        db,
+        actor_user_id=ctx.user.id,
+        event_type='report_exported',
+        entity_type='group',
+        entity_id=group.id,
+        payload={'report': 'final_xlsx'},
+    )
+    db.commit()
+    return Response(
+        content=xlsx,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename={file_name}'},
+    )
+
+
+@router.get('/reports/customers/me/final.xlsx')
+def export_customer_final_report(
+    ctx: AuthContext = Depends(require_roles(UserRole.customer.value)),
+    db: Session = Depends(get_db),
+):
+    student_ids = _customer_student_ids(db, ctx.user.id)
+    if not student_ids:
+        xlsx = _build_excel_bytes(
+            sheet_title='Customer report',
+            headers=[
+                'ФИО слушателя',
+                'Организация',
+                'Прогресс %',
+                'Средний балл',
+                'Дата завершения',
+                'Номер сертификата',
+            ],
+            rows=[],
+        )
+        return Response(
+            content=xlsx,
+            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            headers={'Content-Disposition': 'attachment; filename=customer-final-report.xlsx'},
+        )
+
+    enrollments = db.execute(
+        select(Enrollment)
+        .where(Enrollment.student_id.in_(student_ids))
+        .options(
+            selectinload(Enrollment.student),
+            selectinload(Enrollment.group).selectinload(Group.program),
+        )
+    ).scalars().all()
+
+    lesson_totals = _collect_program_lesson_totals(db, list({item.group.program_id for item in enrollments}))
+    report_rows: list[GroupFinalReportRow] = []
+    for enrollment in enrollments:
+        progress_percent, avg_score, _completed = enrollment_score_stats(
+            db,
+            enrollment.id,
+            total_lessons=lesson_totals.get(enrollment.group.program_id, 0),
+        )
+        report_rows.append(
+            GroupFinalReportRow(
+                full_name=enrollment.student.full_name,
+                organization=enrollment.student.organization,
+                progress_percent=progress_percent,
+                average_score=avg_score,
+                completion_date=enrollment.certification_issued_at,
+                certificate_number=enrollment.certificate_number,
+            )
+        )
+    report_rows.sort(key=lambda item: item.full_name)
+
+    xlsx = _build_excel_bytes(
+        sheet_title='Customer report',
+        headers=[
+            'ФИО слушателя',
+            'Организация',
+            'Прогресс %',
+            'Средний балл',
+            'Дата завершения',
+            'Номер сертификата',
+        ],
+        rows=[
+            [
+                item.full_name,
+                item.organization,
+                item.progress_percent,
+                item.average_score,
+                item.completion_date.isoformat() if item.completion_date else None,
+                item.certificate_number,
+            ]
+            for item in report_rows
+        ],
+    )
+    log_audit(
+        db,
+        actor_user_id=ctx.user.id,
+        event_type='report_exported',
+        entity_type='customer',
+        entity_id=ctx.user.id,
+        payload={'report': 'customer_final_xlsx', 'rows': len(report_rows)},
+    )
+    db.commit()
+    return Response(
+        content=xlsx,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': 'attachment; filename=customer-final-report.xlsx'},
+    )
+
+
+@router.get('/reports/customers/me/final', response_model=CustomerFinalReportResponse)
+def get_customer_final_report(
+    ctx: AuthContext = Depends(require_roles(UserRole.customer.value)),
+    db: Session = Depends(get_db),
+):
+    student_ids = _customer_student_ids(db, ctx.user.id)
+    if not student_ids:
+        return CustomerFinalReportResponse(rows=[])
+
+    enrollments = db.execute(
+        select(Enrollment)
+        .where(Enrollment.student_id.in_(student_ids))
+        .options(
+            selectinload(Enrollment.student),
+            selectinload(Enrollment.group).selectinload(Group.program),
+        )
+    ).scalars().all()
+
+    lesson_totals = _collect_program_lesson_totals(db, list({item.group.program_id for item in enrollments}))
+    rows: list[GroupFinalReportRow] = []
+    for enrollment in enrollments:
+        progress_percent, avg_score, _completed = enrollment_score_stats(
+            db,
+            enrollment.id,
+            total_lessons=lesson_totals.get(enrollment.group.program_id, 0),
+        )
+        rows.append(
+            GroupFinalReportRow(
+                full_name=enrollment.student.full_name,
+                organization=enrollment.student.organization,
+                progress_percent=progress_percent,
+                average_score=avg_score,
+                completion_date=enrollment.certification_issued_at,
+                certificate_number=enrollment.certificate_number,
+            )
+        )
+    rows.sort(key=lambda item: item.full_name)
+    return CustomerFinalReportResponse(rows=rows)
+
+
+@router.get('/reports/programs/{program_id}/stats', response_model=ProgramStatsReportOut)
+def get_program_stats_report(
+    program_id: str,
+    ctx: AuthContext = Depends(require_roles(UserRole.admin.value, UserRole.methodist.value)),
+    db: Session = Depends(get_db),
+):
+    program = db.execute(
+        select(Program)
+        .where(Program.id == program_id)
+        .options(selectinload(Program.groups).selectinload(Group.enrollments))
+    ).scalar_one_or_none()
+    if not program:
+        raise HTTPException(status_code=404, detail='Program not found')
+
+    lesson_total = _collect_program_lesson_totals(db, [program.id]).get(program.id, 0)
+    enrollments = [enrollment for group in program.groups for enrollment in group.enrollments]
+    completion_values: list[float] = []
+    score_values: list[float] = []
+    for enrollment in enrollments:
+        progress_percent, avg_score, _completed = enrollment_score_stats(
+            db,
+            enrollment.id,
+            total_lessons=lesson_total,
+        )
+        completion_values.append(progress_percent)
+        score_values.append(avg_score)
+
+    groups_completed = 0
+    for group in program.groups:
+        if group.enrollments and all(item.program_status.value == 'completed' for item in group.enrollments):
+            groups_completed += 1
+
+    problem_lessons = lesson_problem_stats(db, program.id)
+    return ProgramStatsReportOut(
+        program_id=program.id,
+        program_name=program.name,
+        groups_completed=groups_completed,
+        average_score=round(sum(score_values) / len(score_values), 2) if score_values else 0.0,
+        average_completion_percent=round(sum(completion_values) / len(completion_values), 2)
+        if completion_values
+        else 0.0,
+        problem_lessons=problem_lessons,
+    )
+
+
 @router.post('/assignments', response_model=AssignmentOut, status_code=201)
 def submit_assignment(
     payload: AssignmentSubmitRequest,
@@ -1571,6 +2395,8 @@ def submit_assignment(
     ).scalar_one_or_none()
     if not enrollment:
         raise HTTPException(status_code=404, detail='Enrollment not found')
+    if enrollment.group.program.is_paid and enrollment.payment_status != PaymentStatus.paid:
+        raise HTTPException(status_code=402, detail='Payment is required before assignment submission')
 
     lesson_with_module = db.execute(
         select(Lesson, Module)
@@ -1604,11 +2430,34 @@ def submit_assignment(
     ).scalar_one_or_none()
     before_status = before_progress.status.value if before_progress else ProgressStatus.not_started.value
     progress = set_assignment_waiting(db, enrollment, lesson)
+    text_payload = payload.submission_text.encode('utf-8')
+    try:
+        stored = upload_bytes(
+            key_prefix=f'assignments/{enrollment.id}/{lesson.id}',
+            file_name='submission.txt',
+            data=text_payload,
+            content_type='text/plain',
+        )
+    except Exception as exc:
+        log_integration_error(
+            db,
+            service='storage',
+            operation='upload_assignment_text',
+            error_text=str(exc),
+            context={'enrollment_id': enrollment.id, 'lesson_id': lesson.id},
+            user_id=ctx.user.id,
+        )
+        raise HTTPException(status_code=503, detail='Assignment storage is temporarily unavailable') from exc
+
     submission = AssignmentSubmission(
         enrollment_id=enrollment.id,
         lesson_id=lesson.id,
         submission_text=payload.submission_text,
         status=AssignmentStatus.submitted,
+        file_key=str(stored['key']),
+        file_name=str(stored['file_name']),
+        file_mime=str(stored['content_type']),
+        file_size_bytes=int(stored['size_bytes']),
     )
     db.add(submission)
     db.flush()
@@ -1650,6 +2499,146 @@ def submit_assignment(
 
     db.commit()
 
+    submission = db.execute(
+        select(AssignmentSubmission)
+        .where(AssignmentSubmission.id == submission.id)
+        .options(
+            selectinload(AssignmentSubmission.enrollment).selectinload(Enrollment.student),
+            selectinload(AssignmentSubmission.enrollment)
+            .selectinload(Enrollment.group)
+            .selectinload(Group.program),
+            selectinload(AssignmentSubmission.lesson),
+        )
+    ).scalar_one()
+    return _assignment_out(submission)
+
+
+@router.post('/assignments/upload', response_model=AssignmentOut, status_code=201)
+async def submit_assignment_file(
+    group_id: str = Form(...),
+    lesson_id: str = Form(...),
+    note: str | None = Form(None),
+    file: UploadFile = File(...),
+    ctx: AuthContext = Depends(require_roles(UserRole.student.value)),
+    db: Session = Depends(get_db),
+):
+    student_id = _student_id_for_user(ctx)
+    enrollment = db.execute(
+        select(Enrollment)
+        .where(Enrollment.group_id == group_id, Enrollment.student_id == student_id)
+        .options(selectinload(Enrollment.group).selectinload(Group.program), selectinload(Enrollment.student))
+    ).scalar_one_or_none()
+    if not enrollment:
+        raise HTTPException(status_code=404, detail='Enrollment not found')
+    if enrollment.group.program.is_paid and enrollment.payment_status != PaymentStatus.paid:
+        raise HTTPException(status_code=402, detail='Payment is required before assignment submission')
+
+    lesson_with_module = db.execute(
+        select(Lesson, Module)
+        .join(Module, Module.id == Lesson.module_id)
+        .where(Lesson.id == lesson_id)
+    ).first()
+    if not lesson_with_module:
+        raise HTTPException(status_code=404, detail='Lesson not found')
+    lesson, module = lesson_with_module
+    if module.program_id != enrollment.group.program_id:
+        raise HTTPException(status_code=422, detail='Lesson is not part of enrollment program')
+    if lesson.type.value != 'assignment':
+        raise HTTPException(status_code=422, detail='Assignment submission is allowed only for practical assignment lessons')
+
+    pending = db.execute(
+        select(AssignmentSubmission).where(
+            AssignmentSubmission.enrollment_id == enrollment.id,
+            AssignmentSubmission.lesson_id == lesson.id,
+            AssignmentSubmission.status == AssignmentStatus.submitted,
+        )
+    ).scalar_one_or_none()
+    if pending:
+        raise HTTPException(status_code=409, detail='Previous submission is still awaiting review')
+
+    file_bytes = await file.read()
+    if len(file_bytes) > ASSIGNMENT_MAX_SIZE_BYTES:
+        raise HTTPException(status_code=422, detail='File is too large (max 50 MB)')
+    allowed, reason = is_assignment_file_allowed(file.filename or 'file', file.content_type or '', len(file_bytes))
+    if not allowed:
+        raise HTTPException(status_code=422, detail=reason)
+
+    before_progress = db.execute(
+        select(LessonProgress).where(
+            LessonProgress.enrollment_id == enrollment.id,
+            LessonProgress.lesson_id == lesson.id,
+        )
+    ).scalar_one_or_none()
+    before_status = before_progress.status.value if before_progress else ProgressStatus.not_started.value
+    progress = set_assignment_waiting(db, enrollment, lesson)
+
+    try:
+        stored = upload_bytes(
+            key_prefix=f'assignments/{enrollment.id}/{lesson.id}',
+            file_name=file.filename or 'submission.bin',
+            data=file_bytes,
+            content_type=file.content_type or 'application/octet-stream',
+        )
+    except Exception as exc:
+        log_integration_error(
+            db,
+            service='storage',
+            operation='upload_assignment_file',
+            error_text=str(exc),
+            context={'enrollment_id': enrollment.id, 'lesson_id': lesson.id, 'file_name': file.filename},
+            user_id=ctx.user.id,
+        )
+        raise HTTPException(status_code=503, detail='Assignment storage is temporarily unavailable') from exc
+
+    submission = AssignmentSubmission(
+        enrollment_id=enrollment.id,
+        lesson_id=lesson.id,
+        submission_text=note or 'Файл загружен',
+        status=AssignmentStatus.submitted,
+        file_key=str(stored['key']),
+        file_name=str(stored['file_name']),
+        file_mime=str(stored['content_type']),
+        file_size_bytes=int(stored['size_bytes']),
+    )
+    db.add(submission)
+    db.flush()
+    update_program_status_and_certificate(db, enrollment)
+
+    teacher_ids = db.execute(
+        select(TeacherGroupLink.user_id).where(TeacherGroupLink.group_id == enrollment.group_id)
+    ).all()
+    for (teacher_id,) in teacher_ids:
+        create_notification(
+            db,
+            recipient_user_id=teacher_id,
+            subject='Новое задание на проверку',
+            body=f'{enrollment.student.full_name}: урок "{lesson.title}".',
+            link_url=f'/assignments/{submission.id}',
+            event_key=f'new-assignment-{submission.id}-{teacher_id}',
+            channels=(NotificationChannel.in_app, NotificationChannel.email),
+        )
+
+    log_audit(
+        db,
+        actor_user_id=ctx.user.id,
+        event_type='assignment_submitted',
+        entity_type='assignment_submission',
+        entity_id=submission.id,
+        payload={'lesson_id': lesson.id, 'enrollment_id': enrollment.id, 'file_name': file.filename},
+    )
+    if progress.status.value != before_status:
+        log_audit(
+            db,
+            actor_user_id=ctx.user.id,
+            event_type='lesson_status_changed',
+            entity_type='lesson_progress',
+            entity_id=progress.id,
+            from_status=before_status,
+            to_status=progress.status.value,
+            payload={'lesson_id': lesson.id, 'enrollment_id': enrollment.id},
+        )
+
+    db.commit()
     submission = db.execute(
         select(AssignmentSubmission)
         .where(AssignmentSubmission.id == submission.id)
@@ -2030,6 +3019,33 @@ def mark_notifications_read(
         item.is_read = True
     db.commit()
     return MessageOut(message=f'Marked {len(rows)} notifications as read')
+
+
+@router.get('/integrations/errors', response_model=list[IntegrationErrorOut])
+def list_integration_errors(
+    service: str | None = None,
+    limit: int = 200,
+    ctx: AuthContext = Depends(require_roles(UserRole.admin.value)),
+    db: Session = Depends(get_db),
+):
+    safe_limit = min(max(limit, 1), 500)
+    query = select(IntegrationErrorLog)
+    if service:
+        query = query.where(IntegrationErrorLog.service == service)
+    rows = db.execute(query).scalars().all()
+    rows.sort(key=lambda item: item.created_at, reverse=True)
+    return [
+        IntegrationErrorOut(
+            id=item.id,
+            service=item.service,
+            operation=item.operation,
+            error_text=item.error_text,
+            context_json=item.context_json,
+            user_id=item.user_id,
+            created_at=item.created_at,
+        )
+        for item in rows[:safe_limit]
+    ]
 
 
 @router.get('/audit/events', response_model=list[AuditEventOut])

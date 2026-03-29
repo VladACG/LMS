@@ -6,7 +6,8 @@ export type ProgramStatus = 'draft' | 'active' | 'archived';
 export type ProgressStatus = 'not_started' | 'in_progress' | 'awaiting_review' | 'completed';
 export type ProgramProgressStatus = 'not_started' | 'in_progress' | 'completed';
 export type AssignmentStatus = 'submitted' | 'reviewed' | 'returned_for_revision';
-export type NotificationChannel = 'in_app' | 'email';
+export type NotificationChannel = 'in_app' | 'email' | 'telegram';
+export type PaymentStatus = 'not_required' | 'pending' | 'paid' | 'overdue';
 
 export interface Program {
   id: string;
@@ -17,6 +18,8 @@ export interface Program {
   strict_order: boolean;
   certification_progress_threshold: number;
   certification_min_avg_score: number;
+  is_paid: boolean;
+  price_amount: number | null;
 }
 
 export interface Module {
@@ -42,6 +45,8 @@ export interface ProgramDetail {
   strict_order: boolean;
   certification_progress_threshold: number;
   certification_min_avg_score: number;
+  is_paid: boolean;
+  price_amount: number | null;
   modules: Array<{
     id: string;
     title: string;
@@ -68,6 +73,9 @@ export interface EnrollmentResult {
   student_id: string;
   full_name: string;
   email: string | null;
+  organization?: string | null;
+  payment_status?: PaymentStatus;
+  payment_link?: string | null;
 }
 
 export interface ProgressRow {
@@ -86,6 +94,11 @@ export interface ProgressRow {
   last_login_at: string | null;
   program_status: ProgramProgressStatus;
   certificate_available: boolean;
+  organization?: string | null;
+  average_score?: number;
+  completion_date?: string | null;
+  certificate_number?: string | null;
+  payment_status?: PaymentStatus;
 }
 
 export interface GroupProgress {
@@ -114,6 +127,9 @@ export interface StudentLessonsResponse {
   total: number;
   completed: number;
   program_status: ProgramProgressStatus;
+  payment_status: PaymentStatus;
+  payment_required: boolean;
+  payment_link: string | null;
   lessons: StudentLesson[];
 }
 
@@ -129,6 +145,8 @@ export interface UserProfile {
   blocked: boolean;
   temp_password_required: boolean;
   student_id: string | null;
+  telegram_linked: boolean;
+  telegram_username: string | null;
 }
 
 export interface LoginResponse {
@@ -152,6 +170,7 @@ export interface UserOut {
   blocked: boolean;
   temp_password_required: boolean;
   roles: Role[];
+  telegram_linked: boolean;
 }
 
 export interface AssignmentOut {
@@ -171,6 +190,10 @@ export interface AssignmentOut {
   reviewed_by_user_id: string | null;
   reviewed_at: string | null;
   student_viewed_at: string | null;
+  file_name?: string | null;
+  file_mime?: string | null;
+  file_size_bytes?: number | null;
+  file_download_url?: string | null;
 }
 
 export interface QuestionOut {
@@ -201,5 +224,35 @@ export interface NotificationOut {
   body: string;
   link_url: string | null;
   is_read: boolean;
+  created_at: string;
+}
+
+export interface TelegramLinkOut {
+  invite_url: string;
+  linked: boolean;
+  telegram_username: string | null;
+}
+
+export interface CalendarLinksOut {
+  google_url: string;
+  yandex_url: string;
+  ics_url: string;
+}
+
+export interface PaymentOut {
+  enrollment_id: string;
+  payment_status: PaymentStatus;
+  payment_link: string | null;
+  payment_due_at: string | null;
+  payment_confirmed_at: string | null;
+}
+
+export interface IntegrationErrorOut {
+  id: string;
+  service: string;
+  operation: string;
+  error_text: string;
+  context_json: Record<string, unknown> | null;
+  user_id: string | null;
   created_at: string;
 }

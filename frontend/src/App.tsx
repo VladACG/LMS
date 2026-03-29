@@ -14,10 +14,16 @@ import {
   createProgram,
   createQuestion,
   createUser,
+  downloadCustomerFinalReport,
+  downloadGroupFinalReport,
+  getCalendarLinks,
   getMe,
   getProgram,
   getProgressTable,
+  getStudentPayment,
   getStudentLessons,
+  getTelegramLink,
+  listIntegrationErrors,
   listAssignmentReviewQueue,
   listGroups,
   listMyAssignments,
@@ -38,9 +44,11 @@ import {
 import { ApiError, getAuthToken } from './api/client';
 import type {
   AssignmentOut,
+  IntegrationErrorOut,
   LessonFilterType,
   MeResponse,
   NotificationOut,
+  PaymentStatus,
   ProgramStatus,
   ProgressRow,
   ProgressStatus,
@@ -75,6 +83,13 @@ const progressStatusLabels: Record<ProgressStatus, string> = {
   completed: 'Завершил',
 };
 
+const paymentStatusLabels: Record<PaymentStatus, string> = {
+  not_required: 'Не требуется',
+  pending: 'Ожидает оплаты',
+  paid: 'Оплачено',
+  overdue: 'Просрочено',
+};
+
 const lessonTypeLabels: Record<LessonFilterType, string> = {
   all: 'Все типы',
   video: 'Видео',
@@ -90,6 +105,23 @@ function formatDate(value: string | null): string {
     return '—';
   }
   return new Date(value).toLocaleString('ru-RU');
+}
+
+function channelLabel(channel: 'in_app' | 'email' | 'telegram'): string {
+  if (channel === 'email') return 'Email';
+  if (channel === 'telegram') return 'Telegram';
+  return 'В системе';
+}
+
+function saveBlobAsFile(blob: Blob, filename: string) {
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(url);
 }
 
 function ProgramStatusBadge({ status }: { status: ProgramStatus }) {
@@ -194,10 +226,12 @@ function StudentsProgressTable({
   rows,
   compact = false,
   includeLastLogin = false,
+  includePaymentStatus = false,
 }: {
   rows: ProgressRow[];
   compact?: boolean;
   includeLastLogin?: boolean;
+  includePaymentStatus?: boolean;
 }) {
   if (rows.length === 0) {
     return <p className="muted">По заданным фильтрам данных не найдено.</p>;
@@ -216,6 +250,7 @@ function StudentsProgressTable({
             <th>Дата зачисления</th>
             <th>Последняя активность</th>
             {includeLastLogin ? <th>Последний вход</th> : null}
+            {includePaymentStatus ? <th>Оплата</th> : null}
           </tr>
         </thead>
         <tbody>
@@ -231,6 +266,7 @@ function StudentsProgressTable({
               <td>{formatDate(row.enrolled_at)}</td>
               <td>{formatDate(row.last_activity)}</td>
               {includeLastLogin ? <td>{formatDate(row.last_login_at)}</td> : null}
+              {includePaymentStatus ? <td>{row.payment_status ? paymentStatusLabels[row.payment_status] : '—'}</td> : null}
             </tr>
           ))}
         </tbody>
@@ -337,6 +373,8 @@ function MethodistView() {
 
   const [programName, setProgramName] = useState('');
   const [programDescription, setProgramDescription] = useState('');
+  const [programIsPaid, setProgramIsPaid] = useState(false);
+  const [programPrice, setProgramPrice] = useState(0);
   const [moduleTitle, setModuleTitle] = useState('');
   const [moduleOrder, setModuleOrder] = useState(1);
   const [lessonTitle, setLessonTitle] = useState('');
@@ -384,13 +422,21 @@ function MethodistView() {
   }, [programDetail, selectedModuleId]);
 
   const createProgramMutation = useMutation({
-    mutationFn: () => createProgram({ name: programName, description: programDescription }),
+    mutationFn: () =>
+      createProgram({
+        name: programName,
+        description: programDescription,
+        is_paid: programIsPaid,
+        price_amount: programIsPaid ? programPrice : null,
+      }),
     onSuccess: (program) => {
       queryClient.invalidateQueries({ queryKey: ['programs-base'] });
       queryClient.invalidateQueries({ queryKey: ['programs-catalog'] });
       setSelectedProgramId(program.id);
       setProgramName('');
       setProgramDescription('');
+      setProgramIsPaid(false);
+      setProgramPrice(0);
     },
   });
 
@@ -469,6 +515,26 @@ function MethodistView() {
             value={programDescription}
             onChange={(event) => setProgramDescription(event.target.value)}
           />
+          <label className="stack">
+            <span>
+              <input
+                type="checkbox"
+                checked={programIsPaid}
+                onChange={(event) => setProgramIsPaid(event.target.checked)}
+              />
+              {' '}Платная программа
+            </span>
+          </label>
+          {programIsPaid ? (
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={programPrice}
+              onChange={(event) => setProgramPrice(Number(event.target.value) || 0)}
+              placeholder="Стоимость (RUB)"
+            />
+          ) : null}
           <button type="submit" disabled={createProgramMutation.isPending || programName.trim().length < 2}>Создать программу</button>
         </form>
       </section>
@@ -634,6 +700,7 @@ function MethodistView() {
               <thead>
                 <tr>
                   <th>Название</th>
+                  <th>Тип</th>
                   <th>Статус</th>
                   <th>Дата создания</th>
                 </tr>
@@ -642,6 +709,7 @@ function MethodistView() {
                 {catalogPrograms.map((program) => (
                   <tr key={program.id}>
                     <td>{program.name}</td>
+                    <td>{program.is_paid ? `Платная (${program.price_amount ?? 0} RUB)` : 'Бесплатная'}</td>
                     <td>
                       <ProgramStatusBadge status={program.status} />
                     </td>
@@ -686,6 +754,10 @@ function AdminView() {
   const { data: programs = [] } = useQuery({ queryKey: ['programs-base'], queryFn: () => listPrograms() });
   const { data: groups = [] } = useQuery({ queryKey: ['groups'], queryFn: listGroups });
   const usersQuery = useQuery({ queryKey: ['users'], queryFn: listUsers });
+  const integrationErrorsQuery = useQuery({
+    queryKey: ['integration-errors'],
+    queryFn: () => listIntegrationErrors({ limit: 20 }),
+  });
 
   useEffect(() => {
     if (!selectedGroupId && groups.length > 0) {
@@ -788,20 +860,18 @@ function AdminView() {
   const curators = users.filter((item) => item.roles.includes('curator'));
 
   const exportToExcel = async () => {
-    const { utils, writeFile } = await import('xlsx');
-
-    const exportRows = tableRows.map((row) => ({
-      'ФИО': row.full_name,
-      'Программа': row.program_name,
-      'Группа': row.group_name,
-      'Прогресс %': row.progress_percent,
-      'Дата зачисления': formatDate(row.enrolled_at),
-    }));
-
-    const sheet = utils.json_to_sheet(exportRows);
-    const workbook = utils.book_new();
-    utils.book_append_sheet(workbook, sheet, 'Прогресс');
-    writeFile(workbook, `lms_progress_${Date.now()}.xlsx`);
+    if (!selectedGroupId) {
+      window.alert('Сначала выберите группу');
+      return;
+    }
+    try {
+      const result = await downloadGroupFinalReport(selectedGroupId);
+      saveBlobAsFile(result.blob, result.filename ?? `group_${selectedGroupId}_final.xlsx`);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        window.alert(error.message);
+      }
+    }
   };
 
   return (
@@ -903,7 +973,19 @@ function AdminView() {
           <span className="muted">Строк в таблице: {tableRows.length}</span>
         </div>
 
-        {progressQuery.data ? <StudentsProgressTable rows={tableRows} includeLastLogin /> : null}
+        {progressQuery.data ? <StudentsProgressTable rows={tableRows} includeLastLogin includePaymentStatus /> : null}
+      </section>
+
+      <section className="card card-wide">
+        <h2>Ошибки интеграций</h2>
+        {(integrationErrorsQuery.data ?? []).length === 0 ? <p className="muted">Ошибок интеграций нет.</p> : null}
+        {(integrationErrorsQuery.data ?? []).map((item: IntegrationErrorOut) => (
+          <article key={item.id} className="lesson-card">
+            <p><strong>{item.service}</strong> / {item.operation}</p>
+            <p>{item.error_text}</p>
+            <p className="muted">{formatDate(item.created_at)}</p>
+          </article>
+        ))}
       </section>
 
       <section className="card card-wide">
@@ -1036,6 +1118,17 @@ function StudentView({ me }: { me: MeResponse }) {
     queryFn: () => getStudentLessons(studentId ?? '', selectedGroupId),
     enabled: Boolean(selectedGroupId && studentId),
   });
+  const paymentQuery = useQuery({
+    queryKey: ['student-payment', selectedGroupId, studentId],
+    queryFn: () => getStudentPayment(studentId ?? '', selectedGroupId),
+    enabled: Boolean(selectedGroupId && studentId),
+  });
+  const telegramQuery = useQuery({ queryKey: ['telegram-link'], queryFn: getTelegramLink });
+  const calendarQuery = useQuery({
+    queryKey: ['student-calendar-links', selectedGroupId, studentId],
+    queryFn: () => getCalendarLinks(studentId ?? '', selectedGroupId),
+    enabled: Boolean(selectedGroupId && studentId),
+  });
 
   const contentMutation = useMutation({
     mutationFn: (input: { lessonId: string; lessonType: 'video' | 'text' }) =>
@@ -1105,6 +1198,7 @@ function StudentView({ me }: { me: MeResponse }) {
   }, [lessonTypeFilter, lessonsQuery.data?.lessons]);
 
   const assignmentLessons = (lessonsQuery.data?.lessons ?? []).filter((lesson) => lesson.lesson_type === 'assignment');
+  const paymentRequired = paymentQuery.data ? paymentQuery.data.payment_status !== 'not_required' : false;
 
   return (
     <div className="role-grid">
@@ -1122,6 +1216,47 @@ function StudentView({ me }: { me: MeResponse }) {
           </select>
         </label>
 
+        <div className="stack">
+          <h3>Telegram</h3>
+          <p className="muted">
+            Статус: {telegramQuery.data?.linked ? `привязан (@${telegramQuery.data.telegram_username ?? 'unknown'})` : 'не привязан'}
+          </p>
+          <button
+            type="button"
+            disabled={!telegramQuery.data?.invite_url}
+            onClick={() => window.open(telegramQuery.data?.invite_url ?? '#', '_blank')}
+          >
+            {telegramQuery.data?.linked ? 'Открыть привязку Telegram' : 'Привязать Telegram'}
+          </button>
+        </div>
+
+        <div className="stack">
+          <h3>Календарь</h3>
+          <div className="filters-grid">
+            <button type="button" disabled={!calendarQuery.data?.google_url} onClick={() => window.open(calendarQuery.data?.google_url ?? '#', '_blank')}>
+              Google Calendar
+            </button>
+            <button type="button" disabled={!calendarQuery.data?.yandex_url} onClick={() => window.open(calendarQuery.data?.yandex_url ?? '#', '_blank')}>
+              Яндекс.Календарь
+            </button>
+            <button type="button" disabled={!calendarQuery.data?.ics_url} onClick={() => window.open(calendarQuery.data?.ics_url ?? '#', '_blank')}>
+              Скачать ICS
+            </button>
+          </div>
+        </div>
+
+        <div className="stack">
+          <h3>Оплата</h3>
+          <p className="muted">
+            Статус: {paymentQuery.data ? paymentStatusLabels[paymentQuery.data.payment_status] : '—'}
+          </p>
+          {paymentRequired && paymentQuery.data?.payment_status !== 'paid' ? (
+            <button type="button" disabled={!paymentQuery.data?.payment_link} onClick={() => window.open(paymentQuery.data?.payment_link ?? '#', '_blank')}>
+              Перейти к оплате
+            </button>
+          ) : null}
+        </div>
+
         <label className="stack">
           <span>Фильтр по типу урока</span>
           <select value={lessonTypeFilter} onChange={(event) => setLessonTypeFilter(event.target.value as LessonFilterType)}>
@@ -1136,6 +1271,10 @@ function StudentView({ me }: { me: MeResponse }) {
 
       <section className="card card-wide">
         <h2>Уроки</h2>
+        {paymentRequired && paymentQuery.data?.payment_status !== 'paid' ? (
+          <p className="error">Доступ к урокам откроется после подтверждения оплаты.</p>
+        ) : null}
+        {lessonsQuery.isError ? <p className="error">Не удалось загрузить уроки: возможно, требуется оплата.</p> : null}
         {lessonsQuery.data ? (
           <>
             <p className="muted">
@@ -1218,7 +1357,7 @@ function StudentView({ me }: { me: MeResponse }) {
           <article key={item.id} className="lesson-card">
             <p><strong>{item.subject}</strong></p>
             <p>{item.body}</p>
-            <p className="muted">Канал: {item.channel === 'email' ? 'Email' : 'В системе'} • {formatDate(item.created_at)}</p>
+            <p className="muted">Канал: {channelLabel(item.channel)} • {formatDate(item.created_at)}</p>
             <button type="button" disabled={item.is_read || markReadMutation.isPending} onClick={() => markReadMutation.mutate(item.id)}>
               {item.is_read ? 'Прочитано' : 'Отметить как прочитанное'}
             </button>
@@ -1504,10 +1643,22 @@ function CustomerView() {
   const progressQuery = useQuery({ queryKey: ['customer-progress'], queryFn: () => getProgressTable() });
   const rows = progressQuery.data?.rows ?? [];
 
+  const exportReport = async () => {
+    try {
+      const result = await downloadCustomerFinalReport();
+      saveBlobAsFile(result.blob, result.filename ?? `customer_final_${Date.now()}.xlsx`);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        window.alert(error.message);
+      }
+    }
+  };
+
   return (
     <div className="role-grid">
       <section className="card card-wide">
         <h2>Прогресс сотрудников</h2>
+        <button type="button" onClick={exportReport}>Выгрузить итоговый отчёт (Excel)</button>
         {rows.length === 0 ? <p className="muted">Нет данных для отображения.</p> : null}
         {rows.length > 0 ? (
           <div className="table-wrap">
@@ -1629,7 +1780,7 @@ function App() {
           <article key={item.id} className="lesson-card">
             <p><strong>{item.subject}</strong></p>
             <p>{item.body}</p>
-            <p className="muted">{item.channel === 'email' ? 'Email' : 'В системе'} • {formatDate(item.created_at)}</p>
+            <p className="muted">{channelLabel(item.channel)} • {formatDate(item.created_at)}</p>
             <button type="button" disabled={item.is_read || markReadMutation.isPending} onClick={() => markReadMutation.mutate(item.id)}>
               {item.is_read ? 'Прочитано' : 'Отметить как прочитанное'}
             </button>

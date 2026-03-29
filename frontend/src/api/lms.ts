@@ -1,14 +1,17 @@
-﻿import { apiGet, apiPost, setAuthToken } from './client';
+import { apiGet, apiGetBlob, apiPost, setAuthToken } from './client';
 import type {
   AssignmentOut,
+  CalendarLinksOut,
   EnrollmentResult,
   Group,
   GroupProgress,
+  IntegrationErrorOut,
   Lesson,
   LoginResponse,
   MeResponse,
   Module,
   NotificationOut,
+  PaymentOut,
   Program,
   ProgramDetail,
   ProgressStatus,
@@ -18,6 +21,7 @@ import type {
   Role,
   StudentInput,
   StudentLessonsResponse,
+  TelegramLinkOut,
   UserOut,
 } from '../types/lms';
 
@@ -74,6 +78,8 @@ export function createProgram(payload: {
   strict_order?: boolean;
   certification_progress_threshold?: number;
   certification_min_avg_score?: number;
+  is_paid?: boolean;
+  price_amount?: number | null;
 }) {
   return apiPost<Program>('/api/programs', payload);
 }
@@ -148,6 +154,14 @@ export function getProgressTable(params?: {
 
 export function getStudentLessons(studentId: string, groupId: string) {
   return apiGet<StudentLessonsResponse>(`/api/students/${studentId}/lessons?group_id=${groupId}`);
+}
+
+export function getStudentPayment(studentId: string, groupId: string) {
+  return apiGet<PaymentOut>(`/api/students/${studentId}/payment?group_id=${groupId}`);
+}
+
+export function getCalendarLinks(studentId: string, groupId: string) {
+  return apiGet<CalendarLinksOut>(`/api/students/${studentId}/calendar-links?group_id=${groupId}`);
 }
 
 export function completeLesson(studentId: string, lessonId: string, groupId: string) {
@@ -226,8 +240,32 @@ export function listNotifications(params?: { unread_only?: boolean }) {
   return apiGet<NotificationOut[]>(path);
 }
 
+export function getTelegramLink() {
+  return apiGet<TelegramLinkOut>('/api/telegram/link');
+}
+
+export function confirmTelegramLink(payload: { token: string; chat_id: string; username?: string }) {
+  return apiPost<{ message: string }>('/api/telegram/confirm', payload);
+}
+
 export function markNotificationsRead(notificationIds: string[]) {
   return apiPost<{ message: string }>('/api/notifications/mark-read', { notification_ids: notificationIds });
+}
+
+export function listIntegrationErrors(params?: { service?: string; limit?: number }) {
+  const path = withQuery('/api/integrations/errors', {
+    service: params?.service,
+    limit: params?.limit ? String(params.limit) : undefined,
+  });
+  return apiGet<IntegrationErrorOut[]>(path);
+}
+
+export function downloadGroupFinalReport(groupId: string) {
+  return apiGetBlob(`/api/reports/groups/${groupId}/final.xlsx`);
+}
+
+export function downloadCustomerFinalReport() {
+  return apiGetBlob('/api/reports/customers/me/final.xlsx');
 }
 
 export function listUsers() {
@@ -251,3 +289,4 @@ export function updateUserRoles(userId: string, roles: Role[]) {
 export function blockUser(userId: string, blocked: boolean) {
   return apiPost<UserOut>(`/api/users/${userId}/block`, { blocked });
 }
+

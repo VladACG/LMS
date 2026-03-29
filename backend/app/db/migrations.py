@@ -28,6 +28,22 @@ def _add_missing_columns_postgres(engine: Engine, table_name: str, columns: Iter
                 conn.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN IF NOT EXISTS {ddl}'))
 
 
+def _ensure_postgres_enum_values(engine: Engine) -> None:
+    statements = [
+        "ALTER TYPE notificationchannel ADD VALUE IF NOT EXISTS 'telegram'",
+        "ALTER TYPE assignmentstatus ADD VALUE IF NOT EXISTS 'returned_for_revision'",
+        "ALTER TYPE progressstatus ADD VALUE IF NOT EXISTS 'awaiting_review'",
+        "ALTER TYPE lessontype ADD VALUE IF NOT EXISTS 'assignment'",
+    ]
+    with engine.begin() as conn:
+        for stmt in statements:
+            try:
+                conn.execute(text(stmt))
+            except Exception:
+                # Enum type might not exist in legacy databases; ignore.
+                pass
+
+
 def _create_test_attempts_table(engine: Engine) -> None:
     with engine.begin() as conn:
         conn.execute(
@@ -99,6 +115,9 @@ def apply_sqlite_compat_migrations(engine: Engine) -> None:
     dialect = engine.dialect.name
     inspector = inspect(engine)
 
+    if dialect == 'postgresql':
+        _ensure_postgres_enum_values(engine)
+
     if inspector.has_table('programs'):
         columns = [
             ('strict_order', 'strict_order BOOLEAN NOT NULL DEFAULT TRUE'),
@@ -110,6 +129,8 @@ def apply_sqlite_compat_migrations(engine: Engine) -> None:
                 'certification_min_avg_score',
                 'certification_min_avg_score FLOAT NOT NULL DEFAULT 60.0',
             ),
+            ('is_paid', 'is_paid BOOLEAN NOT NULL DEFAULT FALSE'),
+            ('price_amount', 'price_amount FLOAT'),
         ]
         if dialect == 'sqlite':
             columns = [
@@ -122,6 +143,8 @@ def apply_sqlite_compat_migrations(engine: Engine) -> None:
                     'certification_min_avg_score',
                     'certification_min_avg_score FLOAT NOT NULL DEFAULT 60.0',
                 ),
+                ('is_paid', 'is_paid BOOLEAN NOT NULL DEFAULT 0'),
+                ('price_amount', 'price_amount FLOAT'),
             ]
             _add_missing_columns(engine, 'programs', columns)
         elif dialect == 'postgresql':
@@ -142,6 +165,13 @@ def apply_sqlite_compat_migrations(engine: Engine) -> None:
             ('program_status', "program_status VARCHAR(20) NOT NULL DEFAULT 'not_started'"),
             ('certification_issued_at', 'certification_issued_at TIMESTAMPTZ'),
             ('certificate_url', 'certificate_url VARCHAR(500)'),
+            ('certificate_number', 'certificate_number VARCHAR(100)'),
+            ('payment_status', "payment_status VARCHAR(20) NOT NULL DEFAULT 'not_required'"),
+            ('payment_link', 'payment_link VARCHAR(1000)'),
+            ('payment_due_at', 'payment_due_at TIMESTAMPTZ'),
+            ('payment_confirmed_at', 'payment_confirmed_at TIMESTAMPTZ'),
+            ('payment_provider', 'payment_provider VARCHAR(100)'),
+            ('payment_external_id', 'payment_external_id VARCHAR(255)'),
         ]
         if dialect == 'sqlite':
             _add_missing_columns(
@@ -151,10 +181,66 @@ def apply_sqlite_compat_migrations(engine: Engine) -> None:
                     ('program_status', "program_status VARCHAR(20) NOT NULL DEFAULT 'not_started'"),
                     ('certification_issued_at', 'certification_issued_at DATETIME'),
                     ('certificate_url', 'certificate_url VARCHAR(500)'),
+                    ('certificate_number', 'certificate_number VARCHAR(100)'),
+                    ('payment_status', "payment_status VARCHAR(20) NOT NULL DEFAULT 'not_required'"),
+                    ('payment_link', 'payment_link VARCHAR(1000)'),
+                    ('payment_due_at', 'payment_due_at DATETIME'),
+                    ('payment_confirmed_at', 'payment_confirmed_at DATETIME'),
+                    ('payment_provider', 'payment_provider VARCHAR(100)'),
+                    ('payment_external_id', 'payment_external_id VARCHAR(255)'),
                 ],
             )
         elif dialect == 'postgresql':
             _add_missing_columns_postgres(engine, 'enrollments', columns)
+
+    if inspector.has_table('students'):
+        if dialect == 'sqlite':
+            _add_missing_columns(
+                engine,
+                'students',
+                [
+                    ('organization', 'organization VARCHAR(255)'),
+                ],
+            )
+        elif dialect == 'postgresql':
+            _add_missing_columns_postgres(
+                engine,
+                'students',
+                [
+                    ('organization', 'organization VARCHAR(255)'),
+                ],
+            )
+
+    if inspector.has_table('users'):
+        if dialect == 'sqlite':
+            _add_missing_columns(
+                engine,
+                'users',
+                [
+                    ('telegram_chat_id', 'telegram_chat_id VARCHAR(64)'),
+                    ('telegram_username', 'telegram_username VARCHAR(255)'),
+                    ('telegram_link_token', 'telegram_link_token VARCHAR(64)'),
+                    ('telegram_linked_at', 'telegram_linked_at DATETIME'),
+                ],
+            )
+            with engine.begin() as conn:
+                try:
+                    conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ix_users_telegram_link_token ON users(telegram_link_token)'))
+                except Exception:
+                    pass
+        elif dialect == 'postgresql':
+            _add_missing_columns_postgres(
+                engine,
+                'users',
+                [
+                    ('telegram_chat_id', 'telegram_chat_id VARCHAR(64)'),
+                    ('telegram_username', 'telegram_username VARCHAR(255)'),
+                    ('telegram_link_token', 'telegram_link_token VARCHAR(64)'),
+                    ('telegram_linked_at', 'telegram_linked_at TIMESTAMPTZ'),
+                ],
+            )
+            with engine.begin() as conn:
+                conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS ix_users_telegram_link_token ON users(telegram_link_token)'))
 
     if inspector.has_table('lesson_progress'):
         columns = [
@@ -183,6 +269,10 @@ def apply_sqlite_compat_migrations(engine: Engine) -> None:
                 [
                     ('student_viewed_at', 'student_viewed_at DATETIME'),
                     ('override_reason', 'override_reason TEXT'),
+                    ('file_key', 'file_key VARCHAR(500)'),
+                    ('file_name', 'file_name VARCHAR(255)'),
+                    ('file_mime', 'file_mime VARCHAR(100)'),
+                    ('file_size_bytes', 'file_size_bytes INTEGER'),
                 ],
             )
         elif dialect == 'postgresql':
@@ -192,6 +282,10 @@ def apply_sqlite_compat_migrations(engine: Engine) -> None:
                 [
                     ('student_viewed_at', 'student_viewed_at TIMESTAMPTZ'),
                     ('override_reason', 'override_reason TEXT'),
+                    ('file_key', 'file_key VARCHAR(500)'),
+                    ('file_name', 'file_name VARCHAR(255)'),
+                    ('file_mime', 'file_mime VARCHAR(100)'),
+                    ('file_size_bytes', 'file_size_bytes INTEGER'),
                 ],
             )
 
