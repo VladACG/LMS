@@ -1,4 +1,4 @@
-export type Role = 'methodist' | 'admin' | 'student' | 'teacher' | 'curator' | 'customer';
+export type Role = 'executive' | 'methodist' | 'admin' | 'student' | 'teacher' | 'curator' | 'customer';
 
 export type LessonType = 'video' | 'text' | 'test' | 'assignment';
 export type LessonFilterType = LessonType | 'all';
@@ -255,4 +255,195 @@ export interface IntegrationErrorOut {
   context_json: Record<string, unknown> | null;
   user_id: string | null;
   created_at: string;
+}
+
+export type AnalyticsPeriodPreset = '7d' | '30d' | '3m' | 'custom';
+
+export interface AnalyticsPoint {
+  period: string;
+  value: number;
+}
+
+export interface ExecutiveDashboard {
+  summary: {
+    active_learners: number;
+    programs: number;
+    groups: number;
+  };
+  program_completion: Array<{
+    program_id: string;
+    program_name: string;
+    enrolled: number;
+    completed: number;
+    dropped: number;
+    completion_percent: number;
+    average_score: number;
+  }>;
+  enrollments_by_month: AnalyticsPoint[];
+  top_programs_by_students: Array<{ program_id: string; program_name: string; value: number }>;
+  top_programs_by_score: Array<{ program_id: string; program_name: string; value: number }>;
+  completion_trend: {
+    current: number;
+    previous: number;
+    delta: number;
+    direction: 'up' | 'down' | 'flat';
+  };
+  revenue_by_month: AnalyticsPoint[];
+}
+
+export interface AdminDashboard {
+  executive: ExecutiveDashboard;
+  groups: Array<{
+    group_id: string;
+    group_name: string;
+    program_name: string;
+    end_date: string | null;
+    students_count: number;
+    completion_percent: number;
+    status: 'planned' | 'active' | 'completed';
+  }>;
+  inactive_students: Array<{
+    student_id: string;
+    full_name: string;
+    group_name: string;
+    program_name: string;
+    last_login_at: string | null;
+    progress_percent: number;
+  }>;
+  delayed_reviews: Array<{
+    assignment_id: string;
+    student_name: string;
+    lesson_title: string;
+    teacher_name: string;
+    group_name: string;
+    submitted_at: string;
+    waiting_days: number;
+  }>;
+  integration_errors: Array<{
+    id: string;
+    service: string;
+    operation: string;
+    error_text: string;
+    created_at: string;
+  }>;
+}
+
+export interface MethodistDashboard {
+  program_metrics: Array<{
+    program_id: string;
+    program_name: string;
+    groups_count: number;
+    enrollments_count: number;
+    average_score: number;
+    average_progress_percent: number;
+    average_duration_days: number;
+  }>;
+  problem_lessons: Array<{
+    lesson_id: string;
+    lesson_title: string;
+    program_name: string;
+    module_title: string;
+    repeat_attempts: number;
+    failed_checks: number;
+    avg_stuck_days: number;
+  }>;
+  program_funnel: Array<{
+    program_id: string;
+    program_name: string;
+    module_id: string;
+    module_title: string;
+    module_order: number;
+    reached_count: number;
+  }>;
+  comparison: {
+    left: null | {
+      program_id: string;
+      program_name: string;
+      groups_count: number;
+      enrollments_count: number;
+      average_score: number;
+      average_progress_percent: number;
+      average_duration_days: number;
+    };
+    right: null | {
+      program_id: string;
+      program_name: string;
+      groups_count: number;
+      enrollments_count: number;
+      average_score: number;
+      average_progress_percent: number;
+      average_duration_days: number;
+    };
+  };
+}
+
+export interface CuratorDashboard {
+  students: Array<{
+    student_id: string;
+    full_name: string;
+    group_name: string;
+    program_name: string;
+    progress_percent: number;
+    last_login_at: string | null;
+    current_lesson: string | null;
+    signal: 'green' | 'yellow' | 'red';
+    lag_percent: number;
+    days_left: number | null;
+  }>;
+  signal_counts: {
+    green: number;
+    yellow: number;
+    red: number;
+  };
+  reminders: Array<{
+    id: string;
+    student_id: string;
+    student_name: string;
+    message: string;
+    sent_at: string | null;
+    effect: boolean;
+  }>;
+}
+
+export interface TeacherDashboard {
+  courses: Array<{
+    group_id: string;
+    group_name: string;
+    program_name: string;
+    average_score: number;
+    distribution: Array<{
+      bucket: '0-59' | '60-74' | '75-89' | '90-100';
+      count: number;
+    }>;
+  }>;
+  most_questions_lesson: null | {
+    lesson_title: string;
+    questions_count: number;
+  };
+  average_review_hours: number;
+  review_queue: Array<{
+    assignment_id: string;
+    student_name: string;
+    group_name: string;
+    lesson_title: string;
+    submitted_at: string | null;
+  }>;
+}
+
+export interface CustomerDashboard {
+  summary: {
+    completed: number;
+    in_progress: number;
+    not_started: number;
+  };
+  employees: Array<{
+    student_id: string;
+    full_name: string;
+    program_name: string;
+    group_name: string;
+    progress_percent: number;
+    last_login_at: string | null;
+    status: 'completed' | 'in_progress' | 'not_started';
+  }>;
+  weekly_progress: AnalyticsPoint[];
 }

@@ -30,6 +30,7 @@ def _add_missing_columns_postgres(engine: Engine, table_name: str, columns: Iter
 
 def _ensure_postgres_enum_values(engine: Engine) -> None:
     statements = [
+        "ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'executive'",
         "ALTER TYPE notificationchannel ADD VALUE IF NOT EXISTS 'telegram'",
         "ALTER TYPE assignmentstatus ADD VALUE IF NOT EXISTS 'returned_for_revision'",
         "ALTER TYPE progressstatus ADD VALUE IF NOT EXISTS 'awaiting_review'",

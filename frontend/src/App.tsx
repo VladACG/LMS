@@ -14,14 +14,33 @@ import {
   createProgram,
   createQuestion,
   createUser,
+  downloadAdminDelayedReviews,
+  downloadAdminGroups,
+  downloadAdminInactiveStudents,
+  downloadAdminIntegrationErrors,
+  downloadCuratorReminders,
+  downloadCuratorStudents,
   downloadCustomerFinalReport,
+  downloadCustomerEmployees,
+  downloadExecutiveProgramCompletion,
   downloadGroupFinalReport,
+  downloadMethodistFunnel,
+  downloadMethodistProblemLessons,
+  downloadMethodistPrograms,
+  downloadTeacherCourses,
+  downloadTeacherReviewQueue,
   getCalendarLinks,
+  getAdminDashboard,
+  getCuratorDashboard,
+  getCustomerDashboard,
+  getExecutiveDashboard,
+  getMethodistDashboard,
   getMe,
   getProgram,
   getProgressTable,
   getStudentPayment,
   getStudentLessons,
+  getTeacherDashboard,
   getTelegramLink,
   listIntegrationErrors,
   listAssignmentReviewQueue,
@@ -43,6 +62,7 @@ import {
 } from './api/lms';
 import { ApiError, getAuthToken } from './api/client';
 import type {
+  AnalyticsPeriodPreset,
   AssignmentOut,
   IntegrationErrorOut,
   LessonFilterType,
@@ -62,6 +82,7 @@ import { parseStudentsInput } from './utils/parseStudents';
 import './App.css';
 
 const roleLabels: Record<Role, string> = {
+  executive: 'Руководитель',
   methodist: 'Методист',
   admin: 'Администратор',
   student: 'Слушатель',
@@ -98,7 +119,7 @@ const lessonTypeLabels: Record<LessonFilterType, string> = {
   assignment: 'Задание',
 };
 
-const roleCatalog: Role[] = ['admin', 'methodist', 'teacher', 'curator', 'student', 'customer'];
+const roleCatalog: Role[] = ['executive', 'admin', 'methodist', 'teacher', 'curator', 'student', 'customer'];
 
 function formatDate(value: string | null): string {
   if (!value) {
@@ -130,6 +151,107 @@ function ProgramStatusBadge({ status }: { status: ProgramStatus }) {
 
 function ProgressStatusBadge({ status }: { status: ProgressStatus }) {
   return <span className={`status-pill status-${status}`}>{progressStatusLabels[status]}</span>;
+}
+
+function useAnalyticsPeriod() {
+  const [period, setPeriod] = useState<AnalyticsPeriodPreset>('30d');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+
+  const params = useMemo(() => {
+    const date_from = period === 'custom' && dateFrom ? new Date(`${dateFrom}T00:00:00Z`).toISOString() : undefined;
+    const date_to = period === 'custom' && dateTo ? new Date(`${dateTo}T23:59:59Z`).toISOString() : undefined;
+    return {
+      period,
+      date_from,
+      date_to,
+    };
+  }, [period, dateFrom, dateTo]);
+
+  return {
+    period,
+    setPeriod,
+    dateFrom,
+    setDateFrom,
+    dateTo,
+    setDateTo,
+    params,
+  };
+}
+
+function AnalyticsPeriodFilter({
+  period,
+  setPeriod,
+  dateFrom,
+  setDateFrom,
+  dateTo,
+  setDateTo,
+}: {
+  period: AnalyticsPeriodPreset;
+  setPeriod: (value: AnalyticsPeriodPreset) => void;
+  dateFrom: string;
+  setDateFrom: (value: string) => void;
+  dateTo: string;
+  setDateTo: (value: string) => void;
+}) {
+  return (
+    <div className="toolbar-row">
+      <select value={period} onChange={(event) => setPeriod(event.target.value as AnalyticsPeriodPreset)}>
+        <option value="7d">Последние 7 дней</option>
+        <option value="30d">Последние 30 дней</option>
+        <option value="3m">Последние 3 месяца</option>
+        <option value="custom">Произвольный диапазон</option>
+      </select>
+      {period === 'custom' ? (
+        <>
+          <input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} />
+          <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function KpiCard({ label, value }: { label: string; value: string | number }) {
+  return (
+    <article className="kpi-card">
+      <p className="muted">{label}</p>
+      <h3>{value}</h3>
+    </article>
+  );
+}
+
+function EmptyAnalytics() {
+  return <p className="muted">данных пока недостаточно</p>;
+}
+
+function SimpleBarChart({ data, valueSuffix = '' }: { data: Array<{ label: string; value: number }>; valueSuffix?: string }) {
+  if (data.length === 0) {
+    return <EmptyAnalytics />;
+  }
+
+  const maxValue = Math.max(...data.map((item) => item.value), 0);
+  return (
+    <div className="chart-list">
+      {data.map((item) => {
+        const width = maxValue > 0 ? Math.max((item.value / maxValue) * 100, 2) : 2;
+        return (
+          <div key={item.label} className="chart-row">
+            <div className="chart-meta">
+              <span>{item.label}</span>
+              <strong>
+                {item.value}
+                {valueSuffix}
+              </strong>
+            </div>
+            <div className="chart-track">
+              <div className="chart-fill" style={{ width: `${width}%` }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function LoginView({ onLoggedIn }: { onLoggedIn: () => void }) {
@@ -168,7 +290,7 @@ function LoginView({ onLoggedIn }: { onLoggedIn: () => void }) {
           {errorText ? <p className="error">{errorText}</p> : null}
         </form>
         <p className="muted small">
-          Тестовые логины: `admin@lms.local / Admin123!`, `student1@lms.local / Temp123!`, `teacher@lms.local / Teach123!`
+          Тестовые логины: `executive@lms.local / Exec123!`, `admin@lms.local / Admin123!`, `student1@lms.local / Temp123!`, `teacher@lms.local / Teach123!`
         </p>
       </section>
     </div>
@@ -366,6 +488,458 @@ function StudentModules({
   );
 }
 
+function ExecutiveView() {
+  const filter = useAnalyticsPeriod();
+  const analyticsQuery = useQuery({
+    queryKey: ['analytics-executive', filter.period, filter.params.date_from, filter.params.date_to],
+    queryFn: () => getExecutiveDashboard(filter.params),
+    refetchInterval: 15000,
+  });
+
+  const exportTable = async () => {
+    try {
+      const result = await downloadExecutiveProgramCompletion(filter.params);
+      saveBlobAsFile(result.blob, result.filename ?? `executive_program_completion_${Date.now()}.xlsx`);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        window.alert(error.message);
+      }
+    }
+  };
+
+  const payload = analyticsQuery.data;
+
+  return (
+    <div className="role-grid">
+      <section className="card card-wide">
+        <h2>Дашборд руководителя</h2>
+        <AnalyticsPeriodFilter
+          period={filter.period}
+          setPeriod={filter.setPeriod}
+          dateFrom={filter.dateFrom}
+          setDateFrom={filter.setDateFrom}
+          dateTo={filter.dateTo}
+          setDateTo={filter.setDateTo}
+        />
+        {payload ? (
+          <>
+            <div className="kpi-grid">
+              <KpiCard label="Активные слушатели" value={payload.summary.active_learners} />
+              <KpiCard label="Программы" value={payload.summary.programs} />
+              <KpiCard label="Группы" value={payload.summary.groups} />
+              <KpiCard
+                label="Средняя завершаемость"
+                value={`${payload.completion_trend.current}% ${payload.completion_trend.direction === 'up' ? '↑' : payload.completion_trend.direction === 'down' ? '↓' : '→'}`}
+              />
+            </div>
+
+            <div className="toolbar-row">
+              <button type="button" onClick={exportTable}>Экспорт таблицы программ в Excel</button>
+            </div>
+
+            <div className="role-grid">
+              <section className="card">
+                <h3>Динамика зачислений по месяцам</h3>
+                <SimpleBarChart data={payload.enrollments_by_month.map((item) => ({ label: item.period, value: item.value }))} />
+              </section>
+              <section className="card">
+                <h3>Выручка по месяцам</h3>
+                <SimpleBarChart data={payload.revenue_by_month.map((item) => ({ label: item.period, value: item.value }))} valueSuffix=" ₽" />
+              </section>
+            </div>
+
+            <div className="role-grid">
+              <section className="card">
+                <h3>Топ-5 программ по слушателям</h3>
+                <SimpleBarChart data={payload.top_programs_by_students.map((item) => ({ label: item.program_name, value: item.value }))} />
+              </section>
+              <section className="card">
+                <h3>Топ-5 программ по среднему баллу</h3>
+                <SimpleBarChart data={payload.top_programs_by_score.map((item) => ({ label: item.program_name, value: item.value }))} />
+              </section>
+            </div>
+
+            <h3>Завершаемость по программам</h3>
+            {payload.program_completion.length === 0 ? <EmptyAnalytics /> : null}
+            {payload.program_completion.length > 0 ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Программа</th>
+                      <th>Зачислилось</th>
+                      <th>Завершило</th>
+                      <th>Отчислилось</th>
+                      <th>Завершаемость %</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {payload.program_completion.map((row) => (
+                      <tr key={row.program_id}>
+                        <td>{row.program_name}</td>
+                        <td>{row.enrolled}</td>
+                        <td>{row.completed}</td>
+                        <td>{row.dropped}</td>
+                        <td>{row.completion_percent}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </>
+        ) : analyticsQuery.isLoading ? <p className="muted">Загрузка аналитики...</p> : <p className="error">Не удалось загрузить аналитику.</p>}
+      </section>
+    </div>
+  );
+}
+
+function AdminAnalyticsSection() {
+  const queryClient = useQueryClient();
+  const filter = useAnalyticsPeriod();
+  const analyticsQuery = useQuery({
+    queryKey: ['analytics-admin', filter.period, filter.params.date_from, filter.params.date_to],
+    queryFn: () => getAdminDashboard(filter.params),
+    refetchInterval: 15000,
+  });
+
+  const reminderMutation = useMutation({
+    mutationFn: (studentId: string) =>
+      sendReminder({
+        student_id: studentId,
+        message: 'Напоминание: вы не заходили в LMS более 7 дней. Продолжите обучение.',
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['analytics-admin'] });
+    },
+  });
+
+  const exportAction = async (loader: () => Promise<{ blob: Blob; filename: string | null }>, fallbackName: string) => {
+    try {
+      const result = await loader();
+      saveBlobAsFile(result.blob, result.filename ?? fallbackName);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        window.alert(error.message);
+      }
+    }
+  };
+
+  const payload = analyticsQuery.data;
+  return (
+    <section className="card card-wide">
+      <h2>Аналитика администратора</h2>
+      <AnalyticsPeriodFilter
+        period={filter.period}
+        setPeriod={filter.setPeriod}
+        dateFrom={filter.dateFrom}
+        setDateFrom={filter.setDateFrom}
+        dateTo={filter.dateTo}
+        setDateTo={filter.setDateTo}
+      />
+      {payload ? (
+        <>
+          <div className="kpi-grid">
+            <KpiCard label="Активные слушатели" value={payload.executive.summary.active_learners} />
+            <KpiCard label="Программы" value={payload.executive.summary.programs} />
+            <KpiCard label="Группы" value={payload.executive.summary.groups} />
+            <KpiCard label="Средняя завершаемость" value={`${payload.executive.completion_trend.current}%`} />
+          </div>
+
+          <div className="toolbar-row">
+            <button type="button" onClick={() => exportAction(() => downloadAdminGroups(filter.params), `admin_groups_${Date.now()}.xlsx`)}>
+              Экспорт таблицы групп
+            </button>
+            <button type="button" onClick={() => exportAction(() => downloadAdminInactiveStudents(filter.params), `admin_inactive_${Date.now()}.xlsx`)}>
+              Экспорт неактивных слушателей
+            </button>
+            <button type="button" onClick={() => exportAction(() => downloadAdminDelayedReviews(filter.params), `admin_review_queue_${Date.now()}.xlsx`)}>
+              Экспорт очереди проверки
+            </button>
+            <button type="button" onClick={() => exportAction(() => downloadAdminIntegrationErrors(filter.params), `admin_integration_errors_${Date.now()}.xlsx`)}>
+              Экспорт ошибок интеграций
+            </button>
+          </div>
+
+          <h3>Таблица групп</h3>
+          {payload.groups.length === 0 ? <EmptyAnalytics /> : null}
+          {payload.groups.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Группа</th>
+                    <th>Программа</th>
+                    <th>Дата окончания</th>
+                    <th>Слушателей</th>
+                    <th>Завершение %</th>
+                    <th>Статус</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.groups.map((row) => (
+                    <tr key={row.group_id}>
+                      <td>{row.group_name}</td>
+                      <td>{row.program_name}</td>
+                      <td>{formatDate(row.end_date)}</td>
+                      <td>{row.students_count}</td>
+                      <td>{row.completion_percent}</td>
+                      <td>{row.status}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
+          <h3>Слушатели без входа более 7 дней</h3>
+          {payload.inactive_students.length === 0 ? <EmptyAnalytics /> : null}
+          {payload.inactive_students.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ФИО</th>
+                    <th>Программа</th>
+                    <th>Группа</th>
+                    <th>Прогресс %</th>
+                    <th>Последний вход</th>
+                    <th>Действие</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.inactive_students.map((row) => (
+                    <tr key={`${row.student_id}-${row.group_name}`}>
+                      <td>{row.full_name}</td>
+                      <td>{row.program_name}</td>
+                      <td>{row.group_name}</td>
+                      <td>{row.progress_percent}</td>
+                      <td>{formatDate(row.last_login_at)}</td>
+                      <td>
+                        <button type="button" onClick={() => reminderMutation.mutate(row.student_id)} disabled={reminderMutation.isPending}>
+                          Отправить напоминание
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
+          <h3>Задания на проверке более 2 дней</h3>
+          {payload.delayed_reviews.length === 0 ? <EmptyAnalytics /> : null}
+          {payload.delayed_reviews.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Слушатель</th>
+                    <th>Группа</th>
+                    <th>Урок</th>
+                    <th>Преподаватель</th>
+                    <th>Поступило</th>
+                    <th>Ожидает (дней)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.delayed_reviews.map((row) => (
+                    <tr key={row.assignment_id}>
+                      <td>{row.student_name}</td>
+                      <td>{row.group_name}</td>
+                      <td>{row.lesson_title}</td>
+                      <td>{row.teacher_name}</td>
+                      <td>{formatDate(row.submitted_at)}</td>
+                      <td>{row.waiting_days}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
+          <h3>Ошибки интеграций за 30 дней</h3>
+          {payload.integration_errors.length === 0 ? <EmptyAnalytics /> : null}
+          {payload.integration_errors.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Сервис</th>
+                    <th>Операция</th>
+                    <th>Ошибка</th>
+                    <th>Дата</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.integration_errors.map((row) => (
+                    <tr key={row.id}>
+                      <td>{row.service}</td>
+                      <td>{row.operation}</td>
+                      <td>{row.error_text}</td>
+                      <td>{formatDate(row.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </>
+      ) : analyticsQuery.isLoading ? <p className="muted">Загрузка аналитики...</p> : <p className="error">Не удалось загрузить аналитику.</p>}
+    </section>
+  );
+}
+
+function MethodistAnalyticsSection() {
+  const filter = useAnalyticsPeriod();
+  const analyticsQuery = useQuery({
+    queryKey: ['analytics-methodist', filter.period, filter.params.date_from, filter.params.date_to],
+    queryFn: () => getMethodistDashboard(filter.params),
+    refetchInterval: 15000,
+  });
+
+  const exportAction = async (loader: () => Promise<{ blob: Blob; filename: string | null }>, fallbackName: string) => {
+    try {
+      const result = await loader();
+      saveBlobAsFile(result.blob, result.filename ?? fallbackName);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        window.alert(error.message);
+      }
+    }
+  };
+
+  const payload = analyticsQuery.data;
+  return (
+    <section className="card card-wide">
+      <h2>Аналитика методиста</h2>
+      <AnalyticsPeriodFilter
+        period={filter.period}
+        setPeriod={filter.setPeriod}
+        dateFrom={filter.dateFrom}
+        setDateFrom={filter.setDateFrom}
+        dateTo={filter.dateTo}
+        setDateTo={filter.setDateTo}
+      />
+      {payload ? (
+        <>
+          <div className="toolbar-row">
+            <button type="button" onClick={() => exportAction(() => downloadMethodistPrograms(filter.params), `methodist_programs_${Date.now()}.xlsx`)}>
+              Экспорт метрик программ
+            </button>
+            <button type="button" onClick={() => exportAction(() => downloadMethodistProblemLessons(filter.params), `methodist_problem_lessons_${Date.now()}.xlsx`)}>
+              Экспорт проблемных уроков
+            </button>
+            <button type="button" onClick={() => exportAction(() => downloadMethodistFunnel(filter.params), `methodist_funnel_${Date.now()}.xlsx`)}>
+              Экспорт воронки
+            </button>
+          </div>
+
+          <h3>Метрики по программам</h3>
+          {payload.program_metrics.length === 0 ? <EmptyAnalytics /> : null}
+          {payload.program_metrics.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Программа</th>
+                    <th>Средний балл</th>
+                    <th>Средний прогресс %</th>
+                    <th>Средняя длительность (дни)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.program_metrics.map((row) => (
+                    <tr key={row.program_id}>
+                      <td>{row.program_name}</td>
+                      <td>{row.average_score}</td>
+                      <td>{row.average_progress_percent}</td>
+                      <td>{row.average_duration_days}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
+          <div className="role-grid">
+            <section className="card">
+              <h3>Воронка прохождения</h3>
+              <SimpleBarChart data={payload.program_funnel.map((item) => ({ label: `${item.program_name} / ${item.module_title}`, value: item.reached_count }))} />
+            </section>
+            <section className="card">
+              <h3>Сравнение программ</h3>
+              {payload.comparison.left && payload.comparison.right ? (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Метрика</th>
+                        <th>{payload.comparison.left.program_name}</th>
+                        <th>{payload.comparison.right.program_name}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>Средний балл</td>
+                        <td>{payload.comparison.left.average_score}</td>
+                        <td>{payload.comparison.right.average_score}</td>
+                      </tr>
+                      <tr>
+                        <td>Средний прогресс %</td>
+                        <td>{payload.comparison.left.average_progress_percent}</td>
+                        <td>{payload.comparison.right.average_progress_percent}</td>
+                      </tr>
+                      <tr>
+                        <td>Средняя длительность, дни</td>
+                        <td>{payload.comparison.left.average_duration_days}</td>
+                        <td>{payload.comparison.right.average_duration_days}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <EmptyAnalytics />
+              )}
+            </section>
+          </div>
+
+          <h3>Проблемные уроки</h3>
+          {payload.problem_lessons.length === 0 ? <EmptyAnalytics /> : null}
+          {payload.problem_lessons.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Программа</th>
+                    <th>Модуль</th>
+                    <th>Урок</th>
+                    <th>Повторные попытки</th>
+                    <th>Незачёты</th>
+                    <th>Средняя задержка (дни)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.problem_lessons.map((row) => (
+                    <tr key={row.lesson_id}>
+                      <td>{row.program_name}</td>
+                      <td>{row.module_title}</td>
+                      <td>{row.lesson_title}</td>
+                      <td>{row.repeat_attempts}</td>
+                      <td>{row.failed_checks}</td>
+                      <td>{row.avg_stuck_days}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </>
+      ) : analyticsQuery.isLoading ? <p className="muted">Загрузка аналитики...</p> : <p className="error">Не удалось загрузить аналитику.</p>}
+    </section>
+  );
+}
+
 function MethodistView() {
   const queryClient = useQueryClient();
   const [selectedProgramId, setSelectedProgramId] = useState('');
@@ -499,6 +1073,8 @@ function MethodistView() {
 
   return (
     <div className="role-grid">
+      <MethodistAnalyticsSection />
+
       <section className="card">
         <h2>Создание программы</h2>
         <form
@@ -876,6 +1452,8 @@ function AdminView() {
 
   return (
     <div className="role-grid">
+      <AdminAnalyticsSection />
+
       <section className="card">
         <h2>Создание группы</h2>
         <form
@@ -1396,6 +1974,302 @@ function StudentView({ me }: { me: MeResponse }) {
   );
 }
 
+function TeacherAnalyticsSection() {
+  const filter = useAnalyticsPeriod();
+  const analyticsQuery = useQuery({
+    queryKey: ['analytics-teacher', filter.period, filter.params.date_from, filter.params.date_to],
+    queryFn: () => getTeacherDashboard(filter.params),
+    refetchInterval: 15000,
+  });
+
+  const exportAction = async (loader: () => Promise<{ blob: Blob; filename: string | null }>, fallbackName: string) => {
+    try {
+      const result = await loader();
+      saveBlobAsFile(result.blob, result.filename ?? fallbackName);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        window.alert(error.message);
+      }
+    }
+  };
+
+  const payload = analyticsQuery.data;
+  return (
+    <section className="card card-wide">
+      <h2>Аналитика преподавателя</h2>
+      <AnalyticsPeriodFilter
+        period={filter.period}
+        setPeriod={filter.setPeriod}
+        dateFrom={filter.dateFrom}
+        setDateFrom={filter.setDateFrom}
+        dateTo={filter.dateTo}
+        setDateTo={filter.setDateTo}
+      />
+      {payload ? (
+        <>
+          <div className="toolbar-row">
+            <button type="button" onClick={() => exportAction(() => downloadTeacherCourses(filter.params), `teacher_courses_${Date.now()}.xlsx`)}>
+              Экспорт курсов
+            </button>
+            <button type="button" onClick={() => exportAction(() => downloadTeacherReviewQueue(filter.params), `teacher_queue_${Date.now()}.xlsx`)}>
+              Экспорт очереди проверки
+            </button>
+          </div>
+
+          <div className="kpi-grid">
+            <KpiCard label="Среднее время проверки (часы)" value={payload.average_review_hours} />
+            <KpiCard
+              label="Урок с наибольшим числом вопросов"
+              value={payload.most_questions_lesson ? `${payload.most_questions_lesson.lesson_title} (${payload.most_questions_lesson.questions_count})` : '—'}
+            />
+          </div>
+
+          <h3>По своим курсам</h3>
+          {payload.courses.length === 0 ? <EmptyAnalytics /> : null}
+          <div className="role-grid">
+            {payload.courses.map((course) => (
+              <article key={course.group_id} className="card">
+                <h3>{course.program_name}</h3>
+                <p className="muted">Группа: {course.group_name}</p>
+                <p><strong>Средний балл:</strong> {course.average_score}</p>
+                <SimpleBarChart data={course.distribution.map((item) => ({ label: item.bucket, value: item.count }))} />
+              </article>
+            ))}
+          </div>
+
+          <h3>Очередь заданий на проверку</h3>
+          {payload.review_queue.length === 0 ? <EmptyAnalytics /> : null}
+          {payload.review_queue.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Слушатель</th>
+                    <th>Группа</th>
+                    <th>Урок</th>
+                    <th>Поступило</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.review_queue.map((item) => (
+                    <tr key={item.assignment_id}>
+                      <td>{item.student_name}</td>
+                      <td>{item.group_name}</td>
+                      <td>{item.lesson_title}</td>
+                      <td>{formatDate(item.submitted_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </>
+      ) : analyticsQuery.isLoading ? <p className="muted">Загрузка аналитики...</p> : <p className="error">Не удалось загрузить аналитику.</p>}
+    </section>
+  );
+}
+
+function CuratorAnalyticsSection() {
+  const filter = useAnalyticsPeriod();
+  const analyticsQuery = useQuery({
+    queryKey: ['analytics-curator', filter.period, filter.params.date_from, filter.params.date_to],
+    queryFn: () => getCuratorDashboard(filter.params),
+    refetchInterval: 15000,
+  });
+
+  const exportAction = async (loader: () => Promise<{ blob: Blob; filename: string | null }>, fallbackName: string) => {
+    try {
+      const result = await loader();
+      saveBlobAsFile(result.blob, result.filename ?? fallbackName);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        window.alert(error.message);
+      }
+    }
+  };
+
+  const payload = analyticsQuery.data;
+  return (
+    <section className="card card-wide">
+      <h2>Аналитика куратора</h2>
+      <AnalyticsPeriodFilter
+        period={filter.period}
+        setPeriod={filter.setPeriod}
+        dateFrom={filter.dateFrom}
+        setDateFrom={filter.setDateFrom}
+        dateTo={filter.dateTo}
+        setDateTo={filter.setDateTo}
+      />
+      {payload ? (
+        <>
+          <div className="toolbar-row">
+            <button type="button" onClick={() => exportAction(() => downloadCuratorStudents(filter.params), `curator_students_${Date.now()}.xlsx`)}>
+              Экспорт прогресса слушателей
+            </button>
+            <button type="button" onClick={() => exportAction(() => downloadCuratorReminders(filter.params), `curator_reminders_${Date.now()}.xlsx`)}>
+              Экспорт истории напоминаний
+            </button>
+          </div>
+
+          <div className="kpi-grid">
+            <KpiCard label="Зелёный статус" value={payload.signal_counts.green} />
+            <KpiCard label="Жёлтый статус" value={payload.signal_counts.yellow} />
+            <KpiCard label="Красный статус" value={payload.signal_counts.red} />
+          </div>
+
+          <h3>Прогресс слушателей</h3>
+          {payload.students.length === 0 ? <EmptyAnalytics /> : null}
+          {payload.students.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ФИО</th>
+                    <th>Программа</th>
+                    <th>Группа</th>
+                    <th>Прогресс %</th>
+                    <th>Последний вход</th>
+                    <th>Текущий урок</th>
+                    <th>Светофор</th>
+                    <th>Дней до конца</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.students.map((row) => (
+                    <tr key={`${row.student_id}-${row.group_name}`}>
+                      <td>{row.full_name}</td>
+                      <td>{row.program_name}</td>
+                      <td>{row.group_name}</td>
+                      <td>{row.progress_percent}</td>
+                      <td>{formatDate(row.last_login_at)}</td>
+                      <td>{row.current_lesson ?? '—'}</td>
+                      <td>
+                        <span className={`status-pill status-${row.signal === 'green' ? 'completed' : row.signal === 'yellow' ? 'in_progress' : 'not_started'}`}>
+                          {row.signal === 'green' ? 'Зелёный' : row.signal === 'yellow' ? 'Жёлтый' : 'Красный'}
+                        </span>
+                      </td>
+                      <td>{row.days_left ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
+          <h3>История напоминаний</h3>
+          {payload.reminders.length === 0 ? <EmptyAnalytics /> : null}
+          {payload.reminders.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Слушатель</th>
+                    <th>Текст</th>
+                    <th>Когда</th>
+                    <th>Был эффект</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.reminders.map((row) => (
+                    <tr key={row.id}>
+                      <td>{row.student_name}</td>
+                      <td>{row.message}</td>
+                      <td>{formatDate(row.sent_at)}</td>
+                      <td>{row.effect ? 'Да' : 'Нет'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </>
+      ) : analyticsQuery.isLoading ? <p className="muted">Загрузка аналитики...</p> : <p className="error">Не удалось загрузить аналитику.</p>}
+    </section>
+  );
+}
+
+function CustomerAnalyticsSection() {
+  const filter = useAnalyticsPeriod();
+  const analyticsQuery = useQuery({
+    queryKey: ['analytics-customer', filter.period, filter.params.date_from, filter.params.date_to],
+    queryFn: () => getCustomerDashboard(filter.params),
+    refetchInterval: 15000,
+  });
+
+  const exportEmployees = async () => {
+    try {
+      const result = await downloadCustomerEmployees(filter.params);
+      saveBlobAsFile(result.blob, result.filename ?? `customer_employees_${Date.now()}.xlsx`);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        window.alert(error.message);
+      }
+    }
+  };
+
+  const payload = analyticsQuery.data;
+  return (
+    <section className="card card-wide">
+      <h2>Аналитика заказчика</h2>
+      <AnalyticsPeriodFilter
+        period={filter.period}
+        setPeriod={filter.setPeriod}
+        dateFrom={filter.dateFrom}
+        setDateFrom={filter.setDateFrom}
+        dateTo={filter.dateTo}
+        setDateTo={filter.setDateTo}
+      />
+      {payload ? (
+        <>
+          <div className="toolbar-row">
+            <button type="button" onClick={exportEmployees}>Экспорт сотрудников в Excel</button>
+          </div>
+
+          <div className="kpi-grid">
+            <KpiCard label="Завершили" value={payload.summary.completed} />
+            <KpiCard label="В процессе" value={payload.summary.in_progress} />
+            <KpiCard label="Не начали" value={payload.summary.not_started} />
+          </div>
+
+          <h3>Динамика прохождения по неделям</h3>
+          <SimpleBarChart data={payload.weekly_progress.map((item) => ({ label: item.period, value: item.value }))} valueSuffix="%" />
+
+          <h3>Сотрудники</h3>
+          {payload.employees.length === 0 ? <EmptyAnalytics /> : null}
+          {payload.employees.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ФИО</th>
+                    <th>Программа</th>
+                    <th>Группа</th>
+                    <th>Прогресс %</th>
+                    <th>Статус</th>
+                    <th>Последний вход</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payload.employees.map((row) => (
+                    <tr key={`${row.student_id}-${row.group_name}`}>
+                      <td>{row.full_name}</td>
+                      <td>{row.program_name}</td>
+                      <td>{row.group_name}</td>
+                      <td>{row.progress_percent}</td>
+                      <td>{row.status}</td>
+                      <td>{formatDate(row.last_login_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </>
+      ) : analyticsQuery.isLoading ? <p className="muted">Загрузка аналитики...</p> : <p className="error">Не удалось загрузить аналитику.</p>}
+    </section>
+  );
+}
+
 function TeacherView() {
   const queryClient = useQueryClient();
   const [selectedGroupId, setSelectedGroupId] = useState('');
@@ -1455,6 +2329,8 @@ function TeacherView() {
 
   return (
     <div className="role-grid">
+      <TeacherAnalyticsSection />
+
       <section className="card">
         <h2>Мои группы</h2>
         <select value={selectedGroupId} onChange={(event) => setSelectedGroupId(event.target.value)}>
@@ -1582,6 +2458,8 @@ function CuratorView() {
 
   return (
     <div className="role-grid">
+      <CuratorAnalyticsSection />
+
       <section className="card">
         <h2>Мои слушатели</h2>
         <select value={selectedGroupId} onChange={(event) => setSelectedGroupId(event.target.value)}>
@@ -1656,6 +2534,8 @@ function CustomerView() {
 
   return (
     <div className="role-grid">
+      <CustomerAnalyticsSection />
+
       <section className="card card-wide">
         <h2>Прогресс сотрудников</h2>
         <button type="button" onClick={exportReport}>Выгрузить итоговый отчёт (Excel)</button>
@@ -1790,6 +2670,7 @@ function App() {
 
       {role === 'methodist' ? <MethodistView /> : null}
       {role === 'admin' ? <AdminView /> : null}
+      {role === 'executive' ? <ExecutiveView /> : null}
       {role === 'student' ? <StudentView me={meQuery.data} /> : null}
       {role === 'teacher' ? <TeacherView /> : null}
       {role === 'curator' ? <CuratorView /> : null}

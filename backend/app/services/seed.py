@@ -143,6 +143,13 @@ def seed_default_data(db: Session) -> None:
         password='Method123!',
         roles=[UserRole.methodist],
     )
+    _ensure_user(
+        db,
+        email='executive@lms.local',
+        full_name='Org Executive',
+        password='Exec123!',
+        roles=[UserRole.executive],
+    )
     teacher_user = _ensure_user(
         db,
         email='teacher@lms.local',

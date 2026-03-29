@@ -22,6 +22,7 @@ class ProgramProgressStatus(str, Enum):
 
 
 class UserRole(str, Enum):
+    executive = 'executive'
     student = 'student'
     teacher = 'teacher'
     curator = 'curator'

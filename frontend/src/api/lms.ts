@@ -1,7 +1,12 @@
 import { apiGet, apiGetBlob, apiPost, setAuthToken } from './client';
 import type {
+  AdminDashboard,
+  AnalyticsPeriodPreset,
   AssignmentOut,
   CalendarLinksOut,
+  CuratorDashboard,
+  CustomerDashboard,
+  ExecutiveDashboard,
   EnrollmentResult,
   Group,
   GroupProgress,
@@ -14,6 +19,8 @@ import type {
   PaymentOut,
   Program,
   ProgramDetail,
+  TeacherDashboard,
+  MethodistDashboard,
   ProgressStatus,
   ProgressTableResponse,
   QuestionOut,
@@ -35,6 +42,17 @@ function withQuery(path: string, params: Record<string, string | undefined>): st
 
   const query = search.toString();
   return query ? `${path}?${query}` : path;
+}
+
+function analyticsPath(
+  path: string,
+  params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string },
+): string {
+  return withQuery(path, {
+    period: params?.period,
+    date_from: params?.date_from,
+    date_to: params?.date_to,
+  });
 }
 
 export async function login(payload: { email: string; password: string }) {
@@ -288,5 +306,105 @@ export function updateUserRoles(userId: string, roles: Role[]) {
 
 export function blockUser(userId: string, blocked: boolean) {
   return apiPost<UserOut>(`/api/users/${userId}/block`, { blocked });
+}
+
+export function getExecutiveDashboard(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGet<ExecutiveDashboard>(analyticsPath('/api/analytics/executive', params));
+}
+
+export function getAdminDashboard(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGet<AdminDashboard>(analyticsPath('/api/analytics/admin', params));
+}
+
+export function getMethodistDashboard(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGet<MethodistDashboard>(analyticsPath('/api/analytics/methodist', params));
+}
+
+export function getCuratorDashboard(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGet<CuratorDashboard>(analyticsPath('/api/analytics/curator', params));
+}
+
+export function getTeacherDashboard(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGet<TeacherDashboard>(analyticsPath('/api/analytics/teacher', params));
+}
+
+export function getCustomerDashboard(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGet<CustomerDashboard>(analyticsPath('/api/analytics/customer', params));
+}
+
+export function downloadExecutiveProgramCompletion(params?: {
+  period?: AnalyticsPeriodPreset;
+  date_from?: string;
+  date_to?: string;
+}) {
+  return apiGetBlob(analyticsPath('/api/analytics/executive/program-completion.xlsx', params));
+}
+
+export function downloadAdminGroups(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGetBlob(analyticsPath('/api/analytics/admin/groups.xlsx', params));
+}
+
+export function downloadAdminInactiveStudents(params?: {
+  period?: AnalyticsPeriodPreset;
+  date_from?: string;
+  date_to?: string;
+}) {
+  return apiGetBlob(analyticsPath('/api/analytics/admin/inactive-students.xlsx', params));
+}
+
+export function downloadAdminDelayedReviews(params?: {
+  period?: AnalyticsPeriodPreset;
+  date_from?: string;
+  date_to?: string;
+}) {
+  return apiGetBlob(analyticsPath('/api/analytics/admin/delayed-reviews.xlsx', params));
+}
+
+export function downloadAdminIntegrationErrors(params?: {
+  period?: AnalyticsPeriodPreset;
+  date_from?: string;
+  date_to?: string;
+}) {
+  return apiGetBlob(analyticsPath('/api/analytics/admin/integration-errors.xlsx', params));
+}
+
+export function downloadMethodistPrograms(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGetBlob(analyticsPath('/api/analytics/methodist/programs.xlsx', params));
+}
+
+export function downloadMethodistProblemLessons(params?: {
+  period?: AnalyticsPeriodPreset;
+  date_from?: string;
+  date_to?: string;
+}) {
+  return apiGetBlob(analyticsPath('/api/analytics/methodist/problem-lessons.xlsx', params));
+}
+
+export function downloadMethodistFunnel(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGetBlob(analyticsPath('/api/analytics/methodist/funnel.xlsx', params));
+}
+
+export function downloadCuratorStudents(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGetBlob(analyticsPath('/api/analytics/curator/students.xlsx', params));
+}
+
+export function downloadCuratorReminders(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGetBlob(analyticsPath('/api/analytics/curator/reminders.xlsx', params));
+}
+
+export function downloadTeacherCourses(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGetBlob(analyticsPath('/api/analytics/teacher/courses.xlsx', params));
+}
+
+export function downloadTeacherReviewQueue(params?: {
+  period?: AnalyticsPeriodPreset;
+  date_from?: string;
+  date_to?: string;
+}) {
+  return apiGetBlob(analyticsPath('/api/analytics/teacher/review-queue.xlsx', params));
+}
+
+export function downloadCustomerEmployees(params?: { period?: AnalyticsPeriodPreset; date_from?: string; date_to?: string }) {
+  return apiGetBlob(analyticsPath('/api/analytics/customer/employees.xlsx', params));
 }
 

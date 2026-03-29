@@ -56,6 +56,11 @@ def methodist_headers(client: TestClient) -> dict[str, str]:
 
 
 @pytest.fixture()
+def executive_headers(client: TestClient) -> dict[str, str]:
+    return auth_headers(client, 'executive@lms.local', 'Exec123!')
+
+
+@pytest.fixture()
 def teacher_headers(client: TestClient) -> dict[str, str]:
     return auth_headers(client, 'teacher@lms.local', 'Teach123!')
 

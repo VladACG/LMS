@@ -104,6 +104,16 @@ from app.schemas.lms import (
     UserRoleUpdate,
 )
 from app.services.audit import log_audit
+from app.services.analytics import (
+    PeriodPreset,
+    admin_dashboard,
+    curator_dashboard,
+    customer_dashboard,
+    executive_dashboard,
+    methodist_dashboard,
+    resolve_period_window,
+    teacher_dashboard,
+)
 from app.services.calendar import build_google_calendar_link, build_ics_content, build_yandex_calendar_link
 from app.services.integration_errors import log_integration_error
 from app.services.notifications import create_notification, run_scheduled_notifications
@@ -617,6 +627,26 @@ def _build_excel_bytes(*, sheet_title: str, headers: list[str], rows: list[list[
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
+
+
+def _analytics_window(
+    *,
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+):
+    try:
+        return resolve_period_window(period=period, date_from=date_from, date_to=date_to)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _xlsx_response(content: bytes, file_name: str) -> Response:
+    return Response(
+        content=content,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename={file_name}'},
+    )
 
 
 def _notify_payment_confirmed(db: Session, enrollment: Enrollment) -> None:
@@ -2137,6 +2167,447 @@ def list_progress(
         rows.sort(key=lambda row: row.progress_percent, reverse=(sort_order == 'desc'))
 
     return ProgressTableResponse(rows=rows)
+
+
+@router.get('/analytics/executive')
+def get_executive_dashboard(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    _ctx: AuthContext = Depends(require_roles(UserRole.executive.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    return executive_dashboard(db, window)
+
+
+@router.get('/analytics/admin')
+def get_admin_dashboard(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    _ctx: AuthContext = Depends(require_roles(UserRole.admin.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    return admin_dashboard(db, window)
+
+
+@router.get('/analytics/methodist')
+def get_methodist_dashboard(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    _ctx: AuthContext = Depends(require_roles(UserRole.methodist.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    return methodist_dashboard(db, window)
+
+
+@router.get('/analytics/curator')
+def get_curator_dashboard(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    ctx: AuthContext = Depends(require_roles(UserRole.curator.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    group_ids = _curator_group_ids(db, ctx.user.id)
+    return curator_dashboard(db, user_id=ctx.user.id, group_ids=group_ids, window=window)
+
+
+@router.get('/analytics/teacher')
+def get_teacher_dashboard(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    ctx: AuthContext = Depends(require_roles(UserRole.teacher.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    group_ids = _teacher_group_ids(db, ctx.user.id)
+    return teacher_dashboard(db, user_id=ctx.user.id, group_ids=group_ids, window=window)
+
+
+@router.get('/analytics/customer')
+def get_customer_dashboard(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    ctx: AuthContext = Depends(require_roles(UserRole.customer.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    student_ids = _customer_student_ids(db, ctx.user.id)
+    return customer_dashboard(db, student_ids=student_ids, window=window)
+
+
+@router.get('/analytics/executive/program-completion.xlsx')
+def export_executive_program_completion(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    _ctx: AuthContext = Depends(require_roles(UserRole.executive.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = executive_dashboard(db, window)
+    rows = [
+        [
+            item['program_name'],
+            item['enrolled'],
+            item['completed'],
+            item['dropped'],
+            item['completion_percent'],
+            item['average_score'],
+        ]
+        for item in payload.get('program_completion', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Executive completion',
+        headers=['Программа', 'Зачислено', 'Завершило', 'Отчислилось', 'Завершаемость %', 'Средний балл'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'executive-program-completion.xlsx')
+
+
+@router.get('/analytics/admin/groups.xlsx')
+def export_admin_groups(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    _ctx: AuthContext = Depends(require_roles(UserRole.admin.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = admin_dashboard(db, window)
+    rows = [
+        [
+            item['group_name'],
+            item['program_name'],
+            item['end_date'],
+            item['students_count'],
+            item['completion_percent'],
+            item['status'],
+        ]
+        for item in payload.get('groups', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Admin groups',
+        headers=['Группа', 'Программа', 'Дата окончания', 'Слушателей', 'Завершение %', 'Статус'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'admin-groups.xlsx')
+
+
+@router.get('/analytics/admin/inactive-students.xlsx')
+def export_admin_inactive_students(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    _ctx: AuthContext = Depends(require_roles(UserRole.admin.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = admin_dashboard(db, window)
+    rows = [
+        [
+            item['full_name'],
+            item['program_name'],
+            item['group_name'],
+            item['progress_percent'],
+            item['last_login_at'],
+        ]
+        for item in payload.get('inactive_students', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Inactive students',
+        headers=['ФИО', 'Программа', 'Группа', 'Прогресс %', 'Последний вход'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'admin-inactive-students.xlsx')
+
+
+@router.get('/analytics/admin/delayed-reviews.xlsx')
+def export_admin_delayed_reviews(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    _ctx: AuthContext = Depends(require_roles(UserRole.admin.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = admin_dashboard(db, window)
+    rows = [
+        [
+            item['student_name'],
+            item['group_name'],
+            item['lesson_title'],
+            item['teacher_name'],
+            item['submitted_at'],
+            item['waiting_days'],
+        ]
+        for item in payload.get('delayed_reviews', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Delayed reviews',
+        headers=['Слушатель', 'Группа', 'Урок', 'Преподаватель', 'Поступило', 'Ожидает дней'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'admin-delayed-reviews.xlsx')
+
+
+@router.get('/analytics/admin/integration-errors.xlsx')
+def export_admin_integration_errors(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    _ctx: AuthContext = Depends(require_roles(UserRole.admin.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = admin_dashboard(db, window)
+    rows = [
+        [
+            item['service'],
+            item['operation'],
+            item['error_text'],
+            item['created_at'],
+        ]
+        for item in payload.get('integration_errors', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Integration errors',
+        headers=['Сервис', 'Операция', 'Ошибка', 'Дата'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'admin-integration-errors.xlsx')
+
+
+@router.get('/analytics/methodist/programs.xlsx')
+def export_methodist_programs(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    _ctx: AuthContext = Depends(require_roles(UserRole.methodist.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = methodist_dashboard(db, window)
+    rows = [
+        [
+            item['program_name'],
+            item['groups_count'],
+            item['enrollments_count'],
+            item['average_score'],
+            item['average_progress_percent'],
+            item['average_duration_days'],
+        ]
+        for item in payload.get('program_metrics', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Program metrics',
+        headers=['Программа', 'Групп', 'Слушателей', 'Средний балл', 'Средний прогресс %', 'Средняя длительность, дни'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'methodist-programs.xlsx')
+
+
+@router.get('/analytics/methodist/problem-lessons.xlsx')
+def export_methodist_problem_lessons(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    _ctx: AuthContext = Depends(require_roles(UserRole.methodist.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = methodist_dashboard(db, window)
+    rows = [
+        [
+            item['program_name'],
+            item['module_title'],
+            item['lesson_title'],
+            item['repeat_attempts'],
+            item['failed_checks'],
+            item['avg_stuck_days'],
+        ]
+        for item in payload.get('problem_lessons', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Problem lessons',
+        headers=['Программа', 'Модуль', 'Урок', 'Повторных попыток', 'Незачётов', 'Средняя задержка, дни'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'methodist-problem-lessons.xlsx')
+
+
+@router.get('/analytics/methodist/funnel.xlsx')
+def export_methodist_funnel(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    _ctx: AuthContext = Depends(require_roles(UserRole.methodist.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = methodist_dashboard(db, window)
+    rows = [
+        [
+            item['program_name'],
+            item['module_title'],
+            item['reached_count'],
+        ]
+        for item in payload.get('program_funnel', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Program funnel',
+        headers=['Программа', 'Модуль', 'Дошли до модуля'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'methodist-funnel.xlsx')
+
+
+@router.get('/analytics/curator/students.xlsx')
+def export_curator_students(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    ctx: AuthContext = Depends(require_roles(UserRole.curator.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = curator_dashboard(db, user_id=ctx.user.id, group_ids=_curator_group_ids(db, ctx.user.id), window=window)
+    rows = [
+        [
+            item['full_name'],
+            item['program_name'],
+            item['group_name'],
+            item['progress_percent'],
+            item['last_login_at'],
+            item['current_lesson'],
+            item['signal'],
+            item['days_left'],
+        ]
+        for item in payload.get('students', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Curator students',
+        headers=['ФИО', 'Программа', 'Группа', 'Прогресс %', 'Последний вход', 'Текущий урок', 'Светофор', 'Дней до конца'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'curator-students.xlsx')
+
+
+@router.get('/analytics/curator/reminders.xlsx')
+def export_curator_reminders(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    ctx: AuthContext = Depends(require_roles(UserRole.curator.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = curator_dashboard(db, user_id=ctx.user.id, group_ids=_curator_group_ids(db, ctx.user.id), window=window)
+    rows = [
+        [
+            item['student_name'],
+            item['message'],
+            item['sent_at'],
+            'Да' if item['effect'] else 'Нет',
+        ]
+        for item in payload.get('reminders', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Curator reminders',
+        headers=['Слушатель', 'Напоминание', 'Отправлено', 'Был эффект'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'curator-reminders.xlsx')
+
+
+@router.get('/analytics/teacher/courses.xlsx')
+def export_teacher_courses(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    ctx: AuthContext = Depends(require_roles(UserRole.teacher.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = teacher_dashboard(db, user_id=ctx.user.id, group_ids=_teacher_group_ids(db, ctx.user.id), window=window)
+    rows = [
+        [
+            item['program_name'],
+            item['group_name'],
+            item['average_score'],
+        ]
+        for item in payload.get('courses', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Teacher courses',
+        headers=['Программа', 'Группа', 'Средний балл'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'teacher-courses.xlsx')
+
+
+@router.get('/analytics/teacher/review-queue.xlsx')
+def export_teacher_review_queue(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    ctx: AuthContext = Depends(require_roles(UserRole.teacher.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = teacher_dashboard(db, user_id=ctx.user.id, group_ids=_teacher_group_ids(db, ctx.user.id), window=window)
+    rows = [
+        [
+            item['student_name'],
+            item['group_name'],
+            item['lesson_title'],
+            item['submitted_at'],
+        ]
+        for item in payload.get('review_queue', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Review queue',
+        headers=['Слушатель', 'Группа', 'Урок', 'Поступило'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'teacher-review-queue.xlsx')
+
+
+@router.get('/analytics/customer/employees.xlsx')
+def export_customer_employees(
+    period: PeriodPreset = '30d',
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    ctx: AuthContext = Depends(require_roles(UserRole.customer.value)),
+    db: Session = Depends(get_db),
+):
+    window = _analytics_window(period=period, date_from=date_from, date_to=date_to)
+    payload = customer_dashboard(db, student_ids=_customer_student_ids(db, ctx.user.id), window=window)
+    rows = [
+        [
+            item['full_name'],
+            item['program_name'],
+            item['group_name'],
+            item['progress_percent'],
+            item['status'],
+            item['last_login_at'],
+        ]
+        for item in payload.get('employees', [])
+    ]
+    xlsx = _build_excel_bytes(
+        sheet_title='Customer employees',
+        headers=['ФИО', 'Программа', 'Группа', 'Прогресс %', 'Статус', 'Последний вход'],
+        rows=rows,
+    )
+    return _xlsx_response(xlsx, 'customer-employees.xlsx')
 
 
 @router.get('/reports/groups/{group_id}/final.xlsx')
